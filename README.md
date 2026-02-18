@@ -909,14 +909,13 @@ Free for commercial and personal use.
 
 - 🐛 [Report bugs](https://github.com/0xKirisame/shinkai-shoujo/issues)
 - 💡 [Request features](https://github.com/0xKirisame/shinkai-shoujo/discussions)
-- 📖 [Read the docs](https://kirisame.dev/blog/)
-
+  
 ---
 
 <div align="center">
 
 **Finding your infrastructure's true identity, one privilege at a time.**
 
-[Get Started](#quick-start) • [Documentation]([#](https://kirisame.dev/blog)/) • [GitHub](https://github.com/0xKirisame/shinkai-shoujo)
+[Get Started](#quick-start) • [GitHub](https://github.com/0xKirisame/shinkai-shoujo)
 
 </div>
