@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -123,20 +124,24 @@ func (db *DB) SaveAnalysisResult(ctx context.Context, r AnalysisResult) error {
 	_, err = db.conn.ExecContext(ctx,
 		`INSERT INTO analysis_results
 		 (analysis_date, iam_role, assigned_privileges, used_privileges, unused_privileges, risk_level)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(iam_role) DO UPDATE SET
+		     analysis_date       = excluded.analysis_date,
+		     assigned_privileges = excluded.assigned_privileges,
+		     used_privileges     = excluded.used_privileges,
+		     unused_privileges   = excluded.unused_privileges,
+		     risk_level          = excluded.risk_level`,
 		r.AnalysisDate.Unix(), r.IAMRole, string(assigned), string(used), string(unused), r.RiskLevel,
 	)
 	return err
 }
 
-// GetLatestAnalysisResults returns the most recent analysis result for each role.
+// GetLatestAnalysisResults returns the analysis result for each role.
+// The unique index on iam_role guarantees at most one row per role.
 func (db *DB) GetLatestAnalysisResults(ctx context.Context) ([]AnalysisResult, error) {
 	rows, err := db.conn.QueryContext(ctx, `
 		SELECT iam_role, analysis_date, assigned_privileges, used_privileges, unused_privileges, risk_level
 		FROM analysis_results
-		WHERE id IN (
-			SELECT MAX(id) FROM analysis_results GROUP BY iam_role
-		)
 		ORDER BY iam_role
 	`)
 	if err != nil {
@@ -165,6 +170,20 @@ func (db *DB) GetLatestAnalysisResults(ctx context.Context) ([]AnalysisResult, e
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// GetOldestObservation returns the timestamp of the earliest privilege_usage record.
+// Returns (zero, false, nil) when the table is empty.
+func (db *DB) GetOldestObservation(ctx context.Context) (time.Time, bool, error) {
+	var ts sql.NullInt64
+	err := db.conn.QueryRowContext(ctx, `SELECT MIN(timestamp) FROM privilege_usage`).Scan(&ts)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("querying oldest observation: %w", err)
+	}
+	if !ts.Valid {
+		return time.Time{}, false, nil
+	}
+	return time.Unix(ts.Int64, 0), true, nil
 }
 
 // PurgeOldRecords deletes privilege_usage records older than the given cutoff.

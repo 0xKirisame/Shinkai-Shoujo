@@ -35,6 +35,33 @@ func TestParsePolicyDocument(t *testing.T) {
 	}
 }
 
+func TestParsePolicyDocumentDenyCoverage(t *testing.T) {
+	// Raw JSON:
+	// {"Version":"2012-10-17","Statement":[
+	//   {"Effect":"Allow","Action":["s3:*","ec2:DescribeInstances"],"Resource":"*"},
+	//   {"Effect":"Deny","Action":"ec2:DescribeInstances","Resource":"*"}
+	// ]}
+	// Allow "s3:*" and "ec2:DescribeInstances", but Deny "ec2:DescribeInstances".
+	// Expected result: ["s3:*"] — ec2:DescribeInstances is removed by the deny.
+	encoded := "%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Action%22%3A%5B%22s3%3A%2A%22%2C%22ec2%3ADescribeInstances%22%5D%2C%22Resource%22%3A%22%2A%22%7D%2C%7B%22Effect%22%3A%22Deny%22%2C%22Action%22%3A%22ec2%3ADescribeInstances%22%2C%22Resource%22%3A%22%2A%22%7D%5D%7D"
+
+	actions, err := parsePolicyDocument(encoded)
+	if err != nil {
+		t.Fatalf("parsePolicyDocument() error: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, a := range actions {
+		found[a] = true
+	}
+	if !found["s3:*"] {
+		t.Error("expected s3:* to be present (allow wildcard not split by specific deny)")
+	}
+	if found["ec2:DescribeInstances"] {
+		t.Error("ec2:DescribeInstances should be excluded by the Deny statement")
+	}
+}
+
 func TestParsePolicyDocumentWildcard(t *testing.T) {
 	// Policy with wildcard action: {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}
 	encoded := "%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Action%22%3A%22s3%3A%2A%22%2C%22Resource%22%3A%22%2A%22%7D%5D%7D"

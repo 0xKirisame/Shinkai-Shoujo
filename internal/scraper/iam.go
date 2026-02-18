@@ -30,6 +30,8 @@ type iamClient interface {
 	ListAttachedRolePolicies(ctx context.Context, params *iam.ListAttachedRolePoliciesInput, optFns ...func(*iam.Options)) (*iam.ListAttachedRolePoliciesOutput, error)
 	GetPolicyVersion(ctx context.Context, params *iam.GetPolicyVersionInput, optFns ...func(*iam.Options)) (*iam.GetPolicyVersionOutput, error)
 	ListPolicyVersions(ctx context.Context, params *iam.ListPolicyVersionsInput, optFns ...func(*iam.Options)) (*iam.ListPolicyVersionsOutput, error)
+	ListRolePolicies(ctx context.Context, params *iam.ListRolePoliciesInput, optFns ...func(*iam.Options)) (*iam.ListRolePoliciesOutput, error)
+	GetRolePolicy(ctx context.Context, params *iam.GetRolePolicyInput, optFns ...func(*iam.Options)) (*iam.GetRolePolicyOutput, error)
 }
 
 // Scraper fetches IAM role assignments.
@@ -49,7 +51,7 @@ func New(cfg aws.Config, log *slog.Logger) *Scraper {
 // ScrapeAll fetches all customer-managed roles and their privileges concurrently.
 // Service-linked roles (path prefix /aws-service-role/) are skipped — they are
 // managed by AWS and cannot be modified.
-// NOTE: Inline role policies are not collected (deferred to v1.1).
+// Both attached managed policies and inline role policies are collected.
 func (s *Scraper) ScrapeAll(ctx context.Context) ([]RoleAssignment, error) {
 	allRoles, err := s.listAllRoles(ctx)
 	if err != nil {
@@ -136,7 +138,54 @@ func (s *Scraper) ScrapeRole(ctx context.Context, role types.Role) (RoleAssignme
 			}
 		}
 	}
+
+	// Collect inline (embedded) role policies using the same seen map to deduplicate.
+	inlineNames, err := s.listInlinePolicies(ctx, roleName)
+	if err != nil {
+		s.log.Warn("failed to list inline policies, skipping", "role", roleName, "error", err)
+	} else {
+		for _, policyName := range inlineNames {
+			out, err := s.client.GetRolePolicy(ctx, &iam.GetRolePolicyInput{
+				RoleName:   aws.String(roleName),
+				PolicyName: aws.String(policyName),
+			})
+			if err != nil {
+				s.log.Warn("failed to get inline policy, skipping",
+					"role", roleName, "policy", policyName, "error", err)
+				continue
+			}
+			actions, err := parsePolicyDocument(aws.ToString(out.PolicyDocument))
+			if err != nil {
+				s.log.Warn("failed to parse inline policy document, skipping",
+					"role", roleName, "policy", policyName, "error", err)
+				continue
+			}
+			for _, action := range actions {
+				if _, ok := seen[action]; !ok {
+					seen[action] = struct{}{}
+					ra.Privileges = append(ra.Privileges, action)
+				}
+			}
+		}
+	}
+
 	return ra, nil
+}
+
+// listInlinePolicies returns the names of all inline policies attached to a role.
+func (s *Scraper) listInlinePolicies(ctx context.Context, roleName string) ([]string, error) {
+	var names []string
+	paginator := iam.NewListRolePoliciesPaginator(s.client, &iam.ListRolePoliciesInput{
+		RoleName: aws.String(roleName),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, page.PolicyNames...)
+	}
+	return names, nil
 }
 
 func (s *Scraper) listAllRoles(ctx context.Context) ([]types.Role, error) {

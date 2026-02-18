@@ -53,6 +53,25 @@ func parsePolicyDocument(encoded string) ([]string, error) {
 		return nil, fmt.Errorf("parsing policy JSON: %w", err)
 	}
 
+	// First pass: collect all explicitly Denied actions into a set (normalized).
+	denied := make(map[string]struct{})
+	for _, stmt := range doc.Statement {
+		if !strings.EqualFold(stmt.Effect, "Deny") {
+			continue
+		}
+		for _, action := range stmt.Action {
+			denied[normalizeAction(action)] = struct{}{}
+		}
+	}
+
+	// Second pass: collect Allow actions, skipping those covered by the deny set.
+	// Deny coverage rules applied here:
+	//   - Exact match:       "s3:GetObject" denied if present in denied set.
+	//   - Global wildcard:   "*" in denied set → everything is denied.
+	//   - Service wildcard:  "s3:*" in denied set → all "s3:X" allowed actions are denied.
+	// Note: denying a specific action does not "split" an allowed wildcard (e.g.
+	// Allow "s3:*" + Deny "s3:DeleteObject" keeps "s3:*" in the result because we
+	// cannot enumerate all S3 actions here). This edge case is intentionally accepted.
 	seen := make(map[string]struct{})
 	var actions []string
 	for _, stmt := range doc.Statement {
@@ -60,15 +79,38 @@ func parsePolicyDocument(encoded string) ([]string, error) {
 			continue
 		}
 		for _, action := range stmt.Action {
-			key := strings.ToLower(action)
+			norm := normalizeAction(action)
+			if isDenied(norm, denied) {
+				continue
+			}
+			key := strings.ToLower(norm)
 			if _, ok := seen[key]; !ok {
 				seen[key] = struct{}{}
-				// Preserve original casing for the action name part, lowercase service prefix
-				actions = append(actions, normalizeAction(action))
+				actions = append(actions, norm)
 			}
 		}
 	}
 	return actions, nil
+}
+
+// isDenied reports whether the (already-normalized) action is covered by the deny set.
+func isDenied(action string, denied map[string]struct{}) bool {
+	// Global wildcard: "*" in Deny → every action is denied.
+	if _, ok := denied["*"]; ok {
+		return true
+	}
+	// Exact match.
+	if _, ok := denied[action]; ok {
+		return true
+	}
+	// Service wildcard: "s3:*" in Deny → all "s3:X" actions are denied.
+	if idx := strings.Index(action, ":"); idx != -1 {
+		serviceWildcard := action[:idx+1] + "*"
+		if _, ok := denied[serviceWildcard]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeAction lowercases the service prefix (before ':') and preserves action casing.

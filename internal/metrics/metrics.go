@@ -15,7 +15,7 @@ type Metrics struct {
 	AnalysisRuns     prometheus.Counter
 	UnusedPrivileges *prometheus.GaugeVec
 	AnalysisDuration prometheus.Histogram
-	registry         prometheus.Registerer
+	gatherer         prometheus.Gatherer
 }
 
 // New creates and registers all metrics with the default Prometheus registry.
@@ -68,6 +68,11 @@ func NewWithRegistry(reg prometheus.Registerer) *Metrics {
 	})
 	factory(analysisDuration)
 
+	gatherer, ok := reg.(prometheus.Gatherer)
+	if !ok {
+		panic("BUG: registerer does not implement prometheus.Gatherer")
+	}
+
 	return &Metrics{
 		SpansReceived:    spansReceived,
 		SpansSkipped:     spansSkipped,
@@ -75,11 +80,13 @@ func NewWithRegistry(reg prometheus.Registerer) *Metrics {
 		AnalysisRuns:     analysisRuns,
 		UnusedPrivileges: unusedPrivileges,
 		AnalysisDuration: analysisDuration,
-		registry:         reg,
+		gatherer:         gatherer,
 	}
 }
 
-// Handler returns an HTTP handler for the /metrics endpoint using the default registry.
-func Handler() http.Handler {
-	return promhttp.Handler()
+// Handler returns an HTTP handler for the /metrics endpoint using the registry
+// that was provided to NewWithRegistry. This ensures the handler only exposes
+// metrics registered with this specific Metrics instance.
+func (m *Metrics) Handler() http.Handler {
+	return promhttp.HandlerFor(m.gatherer, promhttp.HandlerOpts{})
 }

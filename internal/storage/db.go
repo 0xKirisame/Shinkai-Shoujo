@@ -104,6 +104,16 @@ CREATE INDEX IF NOT EXISTS idx_analysis_results_role
 
 CREATE INDEX IF NOT EXISTS idx_analysis_results_date
     ON analysis_results (analysis_date);
+
+-- Deduplicate any pre-existing rows (keeps only the latest per role) so that
+-- the UNIQUE index below can be created without conflicts.
+DELETE FROM analysis_results WHERE id NOT IN (
+    SELECT MAX(id) FROM analysis_results GROUP BY iam_role
+);
+
+-- Enforce at most one result row per role going forward.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_results_unique_role
+    ON analysis_results (iam_role);
 `
 	if _, err := db.conn.Exec(schema); err != nil {
 		return fmt.Errorf("running migrations: %w", err)

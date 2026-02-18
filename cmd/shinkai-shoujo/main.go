@@ -207,6 +207,19 @@ func runAnalyze(ctx context.Context, cfg *config.Config, db *storage.DB, m *metr
 	m.IAMRolesScraped.Set(float64(len(assignments)))
 	log.Info("IAM scrape complete", "roles", len(assignments))
 
+	// Warn if the observation window is shorter than the configured minimum.
+	if oldest, ok, err := db.GetOldestObservation(ctx); err != nil {
+		log.Warn("could not check observation age", "error", err)
+	} else if ok {
+		collectedDays := int(time.Since(oldest).Hours() / 24)
+		if collectedDays < cfg.Observation.MinObservationDay {
+			log.Warn("observation window may be too short",
+				"collected_days", collectedDays,
+				"min_recommended_days", cfg.Observation.MinObservationDay,
+			)
+		}
+	}
+
 	engine := correlation.NewEngine(db, cfg.Observation.WindowDays, log, m)
 	results, err := engine.Run(ctx, assignments)
 	if err != nil {
@@ -357,7 +370,7 @@ func daemonCmd() *cobra.Command {
 				Addr:    cfg.Metrics.Endpoint,
 				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path == "/metrics" {
-						metrics.Handler().ServeHTTP(w, r)
+						m.Handler().ServeHTTP(w, r)
 						return
 					}
 					http.NotFound(w, r)

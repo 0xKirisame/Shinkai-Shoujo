@@ -106,6 +106,52 @@ func TestSaveAndGetAnalysisResult(t *testing.T) {
 	}
 }
 
+func TestSaveAnalysisResultUpsert(t *testing.T) {
+	ctx := context.Background()
+	db, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	role := "role/UpsertTest"
+
+	first := AnalysisResult{
+		AnalysisDate:  time.Now().Add(-time.Hour),
+		IAMRole:       role,
+		AssignedPrivs: []string{"s3:GetObject", "s3:PutObject"},
+		UsedPrivs:     []string{"s3:GetObject"},
+		UnusedPrivs:   []string{"s3:PutObject"},
+		RiskLevel:     "LOW",
+	}
+	if err := db.SaveAnalysisResult(ctx, first); err != nil {
+		t.Fatalf("first SaveAnalysisResult() error: %v", err)
+	}
+
+	second := AnalysisResult{
+		AnalysisDate:  time.Now(),
+		IAMRole:       role,
+		AssignedPrivs: []string{"s3:GetObject"},
+		UsedPrivs:     []string{"s3:GetObject"},
+		UnusedPrivs:   []string{},
+		RiskLevel:     "NONE",
+	}
+	if err := db.SaveAnalysisResult(ctx, second); err != nil {
+		t.Fatalf("second SaveAnalysisResult() error: %v", err)
+	}
+
+	results, err := db.GetLatestAnalysisResults(ctx)
+	if err != nil {
+		t.Fatalf("GetLatestAnalysisResults() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected exactly 1 row after upsert, got %d", len(results))
+	}
+	if results[0].RiskLevel != "NONE" {
+		t.Errorf("expected updated RiskLevel NONE, got %s", results[0].RiskLevel)
+	}
+}
+
 func TestPurgeOldRecords(t *testing.T) {
 	ctx := context.Background()
 	db, err := OpenMemory()
