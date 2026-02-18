@@ -1,0 +1,21 @@
+# Binary
+shinkai-shoujo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test/build artifacts
+*.test
+*.out
+coverage.txt
+
+# Database files
+*.db

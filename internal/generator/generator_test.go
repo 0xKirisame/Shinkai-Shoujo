@@ -118,7 +118,7 @@ func TestTerraformResourceName(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"arn:aws:iam::123:role/MyRole", "arn_aws_iam__123_role_myrole"},
+		{"arn:aws:iam::123:role/MyRole", "arn_aws_iam_123_role_myrole"},
 		{"MyRole", "myrole"},
 		{"my-role-name", "my_role_name"},
 	}
