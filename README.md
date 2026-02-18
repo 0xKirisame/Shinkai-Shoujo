@@ -77,7 +77,7 @@ $ shinkai-shoujo generate terraform --output cleanup.tf
 
 ## Philosophy
 
-**The name comes from "Deep Sea Girl" (深海少女) by Hatsune Miku.**
+**The name comes from "Deep Sea Girl" (深海少女) for Hatsune Miku.**
 
 A song about finding your true identity after losing it in the depths.
 
