@@ -75,6 +75,21 @@ $ shinkai-shoujo generate terraform --output cleanup.tf
 
 ---
 
+## Philosophy
+
+**The name comes from "Deep Sea Girl" (深海少女) by Hatsune Miku.**
+
+A song about finding your true identity after losing it in the depths.
+
+**Similarly, Shinkai Shoujo helps your infrastructure find its true identity:**
+- Discovering what privileges are actually needed
+- Removing what doesn't belong
+- Revealing the minimal viable permission set
+
+**Like marine snow falling through the ocean,** telemetry data quietly accumulates, revealing the truth beneath the surface.
+
+---
+
 ## How It Works
 
 ```mermaid
@@ -882,21 +897,6 @@ go run cmd/shinkai-shoujo/main.go analyze
 
 ---
 
-## Philosophy
-
-**The name comes from "Deep Sea Girl" (深海少女) by Hatsune Miku.**
-
-A song about finding your true identity after losing it in the depths.
-
-**Similarly, Shinkai Shoujo helps your infrastructure find its true identity:**
-- Discovering what privileges are actually needed
-- Removing what doesn't belong
-- Revealing the minimal viable permission set
-
-**Like marine snow falling through the ocean,** telemetry data quietly accumulates, revealing the truth beneath the surface.
-
----
-
 ## License
 
 Apache 2.0 - See [LICENSE](LICENSE)
@@ -905,22 +905,11 @@ Free for commercial and personal use.
 
 ---
 
-## Acknowledgments
-
-**To the OpenTelemetry community** for building the foundation this tool relies on.
-
-**To every SRE** who's manually audited IAM policies at 3 AM - this one's for you.
-
-**To Yuuyu** for creating "深海少女" - the song that inspired the name.
-
----
-
 ## Support
 
 - 🐛 [Report bugs](https://github.com/0xKirisame/shinkai-shoujo/issues)
 - 💡 [Request features](https://github.com/0xKirisame/shinkai-shoujo/discussions)
-- 📖 [Read the docs](https://shinkai-shoujo.dev)
-- 💬 [Join Discord](https://discord.gg/shinkai-shoujo)
+- 📖 [Read the docs](https://kirisame.dev/blog/)
 
 ---
 
@@ -928,6 +917,6 @@ Free for commercial and personal use.
 
 **Finding your infrastructure's true identity, one privilege at a time.**
 
-[Get Started](#quick-start) • [Documentation](#) • [GitHub](https://github.com/0xKirisame/shinkai-shoujo)
+[Get Started](#quick-start) • [Documentation]([#](https://kirisame.dev/blog)/) • [GitHub](https://github.com/0xKirisame/shinkai-shoujo)
 
 </div>
