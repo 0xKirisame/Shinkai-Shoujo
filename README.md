@@ -911,7 +911,7 @@ Free for commercial and personal use.
 
 **To every SRE** who's manually audited IAM policies at 3 AM - this one's for you.
 
-**To noaP** for creating "深海少女" - the song that inspired the name.
+**To Yuuyu** for creating "深海少女" - the song that inspired the name.
 
 ---
 
