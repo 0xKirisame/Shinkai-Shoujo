@@ -855,7 +855,7 @@ func correlate(assigned []string, observed []OTelEvent) (used, unused []string) 
 - ✅ SQLite storage
 
 ### v1.1 (Next)
-- [ ] Web UI (browse reports, download Terraform)
+- [ ] Grafana integration
 - [ ] Prometheus metrics
 - [ ] Multi-account support
 - [ ] Scheduled job exclusions (auto-detect cron)
@@ -879,7 +879,6 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md)
 
 **Areas needing help:**
 - AWS SDK special cases (lambda:Invoke → lambda:InvokeFunction)
-- Web UI design
 - Multi-cloud support (GCP, Azure)
 - Documentation improvements
 
