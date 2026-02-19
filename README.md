@@ -12,8 +12,7 @@
 
 **Stop guessing which IAM privileges you actually need.**
 
-[Quick Start](#quick-start) • [How It Works](#how-it-works) • [Installation](#installation) • [Demo](#demo)
-
+[Quick Start](#quick-start) • [How It Works](#how-it-works) • [Installation](#installation)
 </div>
 
 ---
