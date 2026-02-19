@@ -325,29 +325,6 @@ resource "aws_iam_role_policy_attachment" "webserver_new" {
 
 ## Installation
 
-### Binary Release (Recommended)
-
-```bash
-# Linux
-curl -L https://github.com/0xKirisame/shinkai-shoujo/releases/latest/download/shinkai-shoujo-linux-amd64 -o shinkai-shoujo
-
-# macOS
-curl -L https://github.com/0xKirisame/shinkai-shoujo/releases/latest/download/shinkai-shoujo-darwin-arm64 -o shinkai-shoujo
-
-chmod +x shinkai-shoujo
-sudo mv shinkai-shoujo /usr/local/bin/
-```
-
-### Docker
-
-```bash
-docker run -v ~/.aws:/root/.aws \
-  -v $(pwd)/config.yaml:/etc/shinkai-shoujo/config.yaml \
-  0xkirisame/shinkai-shoujo:latest analyze
-```
-
-### From Source
-
 ```bash
 git clone https://github.com/0xKirisame/shinkai-shoujo
 cd shinkai-shoujo
