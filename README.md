@@ -8,6 +8,8 @@
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![AWS](https://img.shields.io/badge/AWS-IAM-FF9900?logo=amazon-aws)
 
+  <img src="https://static.wikia.nocookie.net/vocaloid/images/a/a7/%E6%B7%B1%E6%B5%B7%E5%B0%91%E5%A5%B3_-deep_sea_girl-.png/revision/latest?cb=20221216124014" alt="Deep Sea Girl" width="500" />
+
 *"Deep sea girl, pulled by her arm... The marine snow sings a song of blessing"*
 
 **Stop guessing which IAM privileges you actually need.**
