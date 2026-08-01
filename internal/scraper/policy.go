@@ -1,125 +1,266 @@
 package scraper
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
 )
 
-// policyDocument represents an IAM policy document.
+// policyDocument represents a decoded IAM policy document.
 type policyDocument struct {
-	Version   string      `json:"Version"`
-	Statement []statement `json:"Statement"`
+	Version   string
+	Statement StatementValue
+	Raw       string
 }
 
-// statement represents a single IAM policy statement.
+// statement preserves the IAM statement fields used by a snapshot.
 type statement struct {
-	Effect   string      `json:"Effect"`
-	Action   ActionValue `json:"Action"`
-	Resource interface{} `json:"Resource"`
+	SID            string
+	Effect         string
+	Action         ActionValue
+	NotAction      ActionValue
+	Resource       StringValue
+	NotResource    StringValue
+	ConditionJSON  string
+	hasAction      bool
+	hasNotAction   bool
+	hasResource    bool
+	hasNotResource bool
 }
 
-// ActionValue handles both string and []string for the Action field.
-type ActionValue []string
+// StatementValue handles both an object and an array for the Statement field.
+type StatementValue []statement
 
-func (a *ActionValue) UnmarshalJSON(data []byte) error {
-	// Try array first
-	var arr []string
-	if err := json.Unmarshal(data, &arr); err == nil {
-		*a = arr
-		return nil
+func (s *StatementValue) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return fmt.Errorf("Statement must be an object or array")
 	}
-	// Try single string
-	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
-		return fmt.Errorf("Action must be a string or array of strings: %w", err)
+
+	switch data[0] {
+	case '{':
+		stmt, err := parseStatement(data)
+		if err != nil {
+			return err
+		}
+		*s = StatementValue{stmt}
+	case '[':
+		var rawStatements []json.RawMessage
+		if err := json.Unmarshal(data, &rawStatements); err != nil {
+			return fmt.Errorf("Statement must be an array of objects: %w", err)
+		}
+		statements := make([]statement, 0, len(rawStatements))
+		for i, raw := range rawStatements {
+			stmt, err := parseStatement(raw)
+			if err != nil {
+				return fmt.Errorf("statement %d: %w", i, err)
+			}
+			statements = append(statements, stmt)
+		}
+		*s = statements
+	default:
+		return fmt.Errorf("Statement must be an object or array")
 	}
-	*a = ActionValue{s}
 	return nil
 }
 
-// parsePolicyDocument decodes an IAM policy document from its URL-encoded JSON form.
-// The policy document returned by GetPolicyVersion is URL-percent-encoded.
-func parsePolicyDocument(encoded string) ([]string, error) {
-	// URL-decode the document
-	decoded, err := url.QueryUnescape(encoded)
+// StringValue handles the string-or-array shape used by IAM policy fields.
+type StringValue []string
+
+func (v *StringValue) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return fmt.Errorf("value must be a string or array of strings")
+	}
+
+	switch data[0] {
+	case '[':
+		var values []string
+		if err := json.Unmarshal(data, &values); err != nil {
+			return fmt.Errorf("value must be an array of strings: %w", err)
+		}
+		if len(values) == 0 {
+			return fmt.Errorf("value must not be an empty array")
+		}
+		for _, value := range values {
+			if value == "" {
+				return fmt.Errorf("value must not contain an empty string")
+			}
+		}
+		*v = values
+		return nil
+	case '"':
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return fmt.Errorf("value must be a string: %w", err)
+		}
+		if value == "" {
+			return fmt.Errorf("value must not be empty")
+		}
+		*v = StringValue{value}
+		return nil
+	default:
+		return fmt.Errorf("value must be a string or array of strings")
+	}
+}
+
+// ActionValue is retained for compatibility with existing parser callers.
+type ActionValue = StringValue
+
+func parseStatement(data []byte) (statement, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return statement{}, fmt.Errorf("statement must be an object: %w", err)
+	}
+	if fields == nil {
+		return statement{}, fmt.Errorf("statement must be an object")
+	}
+
+	var stmt statement
+	if raw, ok := fields["Sid"]; ok {
+		if err := json.Unmarshal(raw, &stmt.SID); err != nil {
+			return statement{}, fmt.Errorf("Sid must be a string: %w", err)
+		}
+	}
+	rawEffect, ok := fields["Effect"]
+	if !ok {
+		return statement{}, fmt.Errorf("statement has no Effect")
+	}
+	if err := json.Unmarshal(rawEffect, &stmt.Effect); err != nil {
+		return statement{}, fmt.Errorf("Effect must be a string: %w", err)
+	}
+	if stmt.Effect != "Allow" && stmt.Effect != "Deny" {
+		return statement{}, fmt.Errorf("Effect must be Allow or Deny")
+	}
+
+	if raw, ok := fields["Action"]; ok {
+		stmt.hasAction = true
+		if err := json.Unmarshal(raw, &stmt.Action); err != nil {
+			return statement{}, fmt.Errorf("Action: %w", err)
+		}
+	}
+	if raw, ok := fields["NotAction"]; ok {
+		stmt.hasNotAction = true
+		if err := json.Unmarshal(raw, &stmt.NotAction); err != nil {
+			return statement{}, fmt.Errorf("NotAction: %w", err)
+		}
+	}
+	if stmt.hasAction == stmt.hasNotAction {
+		return statement{}, fmt.Errorf("statement must contain exactly one of Action or NotAction")
+	}
+
+	if raw, ok := fields["Resource"]; ok {
+		stmt.hasResource = true
+		if err := json.Unmarshal(raw, &stmt.Resource); err != nil {
+			return statement{}, fmt.Errorf("Resource: %w", err)
+		}
+	}
+	if raw, ok := fields["NotResource"]; ok {
+		stmt.hasNotResource = true
+		if err := json.Unmarshal(raw, &stmt.NotResource); err != nil {
+			return statement{}, fmt.Errorf("NotResource: %w", err)
+		}
+	}
+	if stmt.hasResource == stmt.hasNotResource {
+		return statement{}, fmt.Errorf("statement must contain exactly one of Resource or NotResource")
+	}
+
+	if raw, ok := fields["Condition"]; ok {
+		condition, err := canonicalJSONObject(raw)
+		if err != nil {
+			return statement{}, fmt.Errorf("Condition: %w", err)
+		}
+		stmt.ConditionJSON = condition
+	}
+	return stmt, nil
+}
+
+func canonicalJSONObject(data []byte) (string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value map[string]interface{}
+	if err := decoder.Decode(&value); err != nil {
+		return "", fmt.Errorf("must be an object: %w", err)
+	}
+	if value == nil {
+		return "", fmt.Errorf("must be an object")
+	}
+	canonical, err := json.Marshal(value)
 	if err != nil {
-		return nil, fmt.Errorf("url-decoding policy: %w", err)
+		return "", fmt.Errorf("canonicalizing JSON: %w", err)
 	}
+	return string(canonical), nil
+}
 
-	var doc policyDocument
-	if err := json.Unmarshal([]byte(decoded), &doc); err != nil {
-		return nil, fmt.Errorf("parsing policy JSON: %w", err)
-	}
-
-	// First pass: collect all explicitly Denied actions into a set (normalized).
-	denied := make(map[string]struct{})
-	for _, stmt := range doc.Statement {
-		if !strings.EqualFold(stmt.Effect, "Deny") {
-			continue
+func parseFullPolicyDocument(encoded string) (policyDocument, error) {
+	decoded := encoded
+	if !json.Valid([]byte(decoded)) {
+		pathDecoded, pathErr := url.PathUnescape(encoded)
+		if pathErr == nil && json.Valid([]byte(pathDecoded)) {
+			decoded = pathDecoded
+		} else {
+			var err error
+			decoded, err = url.QueryUnescape(encoded)
+			if err != nil {
+				return policyDocument{}, fmt.Errorf("url-decoding policy: %w", err)
+			}
 		}
-		for _, action := range stmt.Action {
-			denied[normalizeAction(action)] = struct{}{}
-		}
 	}
 
-	// Second pass: collect Allow actions, skipping those covered by the deny set.
-	// Deny coverage rules applied here:
-	//   - Exact match:       "s3:GetObject" denied if present in denied set.
-	//   - Global wildcard:   "*" in denied set → everything is denied.
-	//   - Service wildcard:  "s3:*" in denied set → all "s3:X" allowed actions are denied.
-	// Note: denying a specific action does not "split" an allowed wildcard (e.g.
-	// Allow "s3:*" + Deny "s3:DeleteObject" keeps "s3:*" in the result because we
-	// cannot enumerate all S3 actions here). This edge case is intentionally accepted.
+	var raw struct {
+		Version   string          `json:"Version"`
+		Statement json.RawMessage `json:"Statement"`
+	}
+	if err := json.Unmarshal([]byte(decoded), &raw); err != nil {
+		return policyDocument{}, fmt.Errorf("parsing policy JSON: %w", err)
+	}
+	if len(raw.Statement) == 0 {
+		return policyDocument{}, fmt.Errorf("policy has no Statement")
+	}
+	var statements StatementValue
+	if err := json.Unmarshal(raw.Statement, &statements); err != nil {
+		return policyDocument{}, fmt.Errorf("parsing policy Statement: %w", err)
+	}
+	return policyDocument{Version: raw.Version, Statement: statements, Raw: decoded}, nil
+}
+
+// parsePolicyDocument returns the flattened Allow/Action inventory used by
+// correlation. Full snapshot scraping uses parseFullPolicyDocument instead.
+func parsePolicyDocument(encoded string) ([]string, error) {
+	doc, err := parseFullPolicyDocument(encoded)
+	if err != nil {
+		return nil, err
+	}
+
 	seen := make(map[string]struct{})
 	var actions []string
 	for _, stmt := range doc.Statement {
 		if !strings.EqualFold(stmt.Effect, "Allow") {
 			continue
 		}
+		if stmt.hasNotAction {
+			return nil, fmt.Errorf("Allow statement using NotAction cannot be represented safely")
+		}
 		for _, action := range stmt.Action {
-			norm := normalizeAction(action)
-			if isDenied(norm, denied) {
+			normalized := normalizeAction(action)
+			key := strings.ToLower(normalized)
+			if _, ok := seen[key]; ok {
 				continue
 			}
-			key := strings.ToLower(norm)
-			if _, ok := seen[key]; !ok {
-				seen[key] = struct{}{}
-				actions = append(actions, norm)
-			}
+			seen[key] = struct{}{}
+			actions = append(actions, normalized)
 		}
 	}
 	return actions, nil
 }
 
-// isDenied reports whether the (already-normalized) action is covered by the deny set.
-func isDenied(action string, denied map[string]struct{}) bool {
-	// Global wildcard: "*" in Deny → every action is denied.
-	if _, ok := denied["*"]; ok {
-		return true
-	}
-	// Exact match.
-	if _, ok := denied[action]; ok {
-		return true
-	}
-	// Service wildcard: "s3:*" in Deny → all "s3:X" actions are denied.
-	if idx := strings.Index(action, ":"); idx != -1 {
-		serviceWildcard := action[:idx+1] + "*"
-		if _, ok := denied[serviceWildcard]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // normalizeAction lowercases the service prefix (before ':') and preserves action casing.
-// e.g. "S3:GetObject" → "s3:GetObject", "s3:*" → "s3:*"
 func normalizeAction(action string) string {
 	parts := strings.SplitN(action, ":", 2)
 	if len(parts) == 2 {
 		return strings.ToLower(parts[0]) + ":" + parts[1]
 	}
-	// "*" or other bare wildcards
 	return strings.ToLower(action)
 }

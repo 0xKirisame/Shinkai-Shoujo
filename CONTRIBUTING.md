@@ -1,6 +1,6 @@
 # Contributing to Shinkai Shoujo
 
-Thanks for your interest in contributing! Shinkai Shoujo aims to be the simplest, most maintainable CIEM tool possible. We value **simplicity over features** and **standard tools over custom solutions**.
+Thanks for your interest in contributing! Shinkai Shoujo is an OTel-native AWS IAM usage backend. We value **correctness over confident guesses** and **standard tools over custom solutions**.
 
 ---
 
@@ -16,18 +16,18 @@ Before contributing, please understand our core principles:
 2. **Use Standard Tools**
    - OpenTelemetry (not custom telemetry)
    - Grafana (not custom dashboards)
-   - Terraform (not proprietary DSL)
-   - SQLite (not complex databases)
+   - ClickHouse for telemetry analytics
+   - Grafana and SQL for exploration
 
 3. **Maintainability > Features**
    - Every line of code is a liability
    - If you can't maintain it yourself, don't add it
    - Documentation is part of the feature
 
-4. **Agentless Forever**
-   - Never require agent deployment
-   - Never add kernel dependencies
-   - Keep it deployable in 5 minutes
+4. **Application Telemetry, Not Infrastructure Surveillance**
+   - Capture dedicated events from instrumented AWS SDK calls
+   - Never require kernel dependencies
+   - Do not add CloudTrail as an activity source
 
 ---
 
@@ -84,7 +84,7 @@ Before proposing a feature, ask yourself:
 
 **Good feature requests:**
 - Support for GCP IAM (major cloud provider)
-- CloudTrail fallback (increases accuracy)
+- Additional AWS SDK middleware integrations
 - Scheduled job auto-detection (common use case)
 
 **Bad feature requests:**
@@ -384,9 +384,9 @@ var specialCases = map[string]string{
 ```
 
 **How to help:**
-1. Find OTel traces that don't match IAM privileges
+1. Find dedicated OTel events whose SDK operation does not match an IAM action
 2. Look up the correct IAM action in AWS docs
-3. Add mapping to `special_cases.go`
+3. Add mapping to `internal/correlation/mapping.go`
 4. Add test case
 
 **Good first issue:** [#12](https://github.com/0xKirisame/shinkai-shoujo/issues/12)
@@ -409,19 +409,17 @@ We need GCP IAM and Azure RBAC support.
 
 ---
 
-**3. CloudTrail Fallback**
+**3. OTel Event Instrumentation**
 
-When OTel coverage is low, fall back to CloudTrail.
+Build lightweight AWS SDK middleware that emits the `shinkai.aws_api_call` log contract without depending on trace sampling.
 
 **What's needed:**
-- `internal/aws/cloudtrail.go` - Parse CloudTrail logs
-- Detect low OTel coverage (< 50% of expected API calls)
-- Merge CloudTrail data with OTel data
-- Tests with sample CloudTrail logs
+- Go, Python, Java, and Node.js SDK integrations
+- Cached workload-role identity resolution
+- Per-event identity support for applications that assume roles dynamically
+- Tests for success, denied, retry, and failed outcomes
 
-**Skills needed:** AWS CloudTrail, S3, parsing large JSON files
-
-**Issue:** [#31](https://github.com/0xKirisame/shinkai-shoujo/issues/31)
+**Skills needed:** OpenTelemetry logs and AWS SDK middleware
 
 ---
 
@@ -435,7 +433,7 @@ Adding shinkai shoujo to grafana:
 - Alert templates
 - Variables for filtering
 
-**Skills needed:** Grafana dashboard JSON, PromQL
+**Skills needed:** Grafana dashboard JSON and ClickHouse SQL
 
 **Issue:** [#45](https://github.com/0xKirisame/shinkai-shoujo/issues/45)
 
@@ -446,9 +444,8 @@ Adding shinkai shoujo to grafana:
 Automatically exclude privileges used by cron jobs.
 
 **What's needed:**
-- Parse CloudWatch Events / EventBridge schedules
-- Calculate job frequency
-- Auto-exclude if frequency < observation window
+- Calculate frequency from ClickHouse event history
+- Surface long-period usage without silently excluding it
 - Add to correlation engine
 
 **Skills needed:** AWS CloudWatch Events API
@@ -479,7 +476,7 @@ Always needed:
 Track not just "s3:GetObject" but "s3:GetObject on bucket X"
 
 **What's needed:**
-- Parse resource ARNs from OTel attributes
+- Add resource ARNs to dedicated OTel usage events
 - Update correlation to match resource-specific policies
 - More complex, lower ROI
 
@@ -511,9 +508,8 @@ If you find performance issues:
 - Batch processing is sufficient
 - Real-time adds complexity
 
-❌ **Agent deployment**
-- Defeats the "agentless" value prop
-- Use OTel collector if you need agents
+❌ **Kernel or host surveillance agents**
+- Instrument AWS SDK calls and use the existing OTel collector pipeline
 
 ❌ **Proprietary integrations**
 - Only open standards (OTel, Prometheus)

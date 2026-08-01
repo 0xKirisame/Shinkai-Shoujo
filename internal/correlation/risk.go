@@ -14,6 +14,26 @@ const (
 // highPrefixes are action prefixes that indicate high-risk operations.
 var highPrefixes = []string{"Delete", "Terminate"}
 
+// highActions are well-known privilege-escalation operations whose names do
+// not otherwise look destructive.
+var highActions = map[string]struct{}{
+	"iam:addusertogroup":          {},
+	"iam:attachgrouppolicy":       {},
+	"iam:attachrolepolicy":        {},
+	"iam:attachuserpolicy":        {},
+	"iam:createaccesskey":         {},
+	"iam:createloginprofile":      {},
+	"iam:createpolicyversion":     {},
+	"iam:passrole":                {},
+	"iam:putgrouppolicy":          {},
+	"iam:putrolepolicy":           {},
+	"iam:putuserpolicy":           {},
+	"iam:setdefaultpolicyversion": {},
+	"iam:updateassumerolepolicy":  {},
+	"iam:updateloginprofile":      {},
+	"sts:assumerole":              {},
+}
+
 // lowPrefixes are action prefixes that indicate low-risk (read-only) operations.
 var lowPrefixes = []string{"Describe", "List", "Get"}
 
@@ -23,6 +43,10 @@ var mediumPrefixes = []string{"Create", "Put", "Modify", "Update", "Attach", "De
 // ClassifyPrivilege returns the risk level for a single IAM privilege.
 // Format: "service:Action" or "service:*" or "*".
 func ClassifyPrivilege(privilege string) RiskLevel {
+	if strings.ContainsAny(privilege, "*?") {
+		return RiskHigh
+	}
+
 	parts := strings.SplitN(privilege, ":", 2)
 	var action string
 	if len(parts) == 2 {
@@ -31,23 +55,24 @@ func ClassifyPrivilege(privilege string) RiskLevel {
 		action = privilege
 	}
 
-	// Wildcards are medium risk (conservative)
-	if action == "*" || strings.HasSuffix(action, "*") {
-		return RiskMedium
+	privilegeLower := strings.ToLower(privilege)
+	actionLower := strings.ToLower(action)
+	if _, high := highActions[privilegeLower]; high {
+		return RiskHigh
 	}
 
 	for _, prefix := range highPrefixes {
-		if strings.HasPrefix(action, prefix) {
+		if strings.HasPrefix(actionLower, strings.ToLower(prefix)) {
 			return RiskHigh
 		}
 	}
 	for _, prefix := range lowPrefixes {
-		if strings.HasPrefix(action, prefix) {
+		if strings.HasPrefix(actionLower, strings.ToLower(prefix)) {
 			return RiskLow
 		}
 	}
 	for _, prefix := range mediumPrefixes {
-		if strings.HasPrefix(action, prefix) {
+		if strings.HasPrefix(actionLower, strings.ToLower(prefix)) {
 			return RiskMedium
 		}
 	}

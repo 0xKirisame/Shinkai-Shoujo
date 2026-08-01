@@ -17,8 +17,10 @@ func (g *YAMLGenerator) Generate(results []correlation.Result, w io.Writer) erro
 	report := buildReport(results)
 	enc := yaml.NewEncoder(w)
 	enc.SetIndent(2)
-	if err := enc.Encode(report); err != nil {
-		return err
+	encodeErr := enc.Encode(report)
+	closeErr := enc.Close()
+	if encodeErr != nil {
+		return encodeErr
 	}
-	return enc.Close()
+	return closeErr
 }

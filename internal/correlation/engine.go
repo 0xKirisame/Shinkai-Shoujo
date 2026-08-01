@@ -4,236 +4,427 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/0xKirisame/shinkai-shoujo/internal/metrics"
-	"github.com/0xKirisame/shinkai-shoujo/internal/scraper"
 	"github.com/0xKirisame/shinkai-shoujo/internal/storage"
 )
 
+// ActionUsage is the observed event aggregate for one IAM action.
+type ActionUsage struct {
+	Action           string
+	SuccessfulEvents uint64
+	DeniedEvents     uint64
+	FailedEvents     uint64
+	FirstSuccess     time.Time
+	LastSuccess      time.Time
+}
+
 // Result holds the correlation analysis for a single IAM role.
 type Result struct {
-	IAMRole    string
-	Assigned   []string
-	Used       []string
-	Unused     []string
-	RiskLevel  string
-	AnalyzedAt time.Time
+	AccountID        string
+	IAMRole          string
+	Assigned         []string
+	Used             []string
+	Unused           []string
+	Unresolved       []string
+	Warnings         []string
+	Usage            []ActionUsage
+	ObservationStart time.Time
+	AnalyzedAt       time.Time
+	RiskLevel        string
 }
 
-// Engine performs correlation between observed OTel privileges and IAM assignments.
+type usageStore interface {
+	GetCollectorCoverage(context.Context, time.Time) (storage.CollectorCoverage, error)
+	QueryPermissionUsage(context.Context, storage.UsageQuery) ([]storage.PermissionUsage, error)
+}
+
+// Engine correlates an IAM snapshot with observed permission usage.
 type Engine struct {
-	db         *storage.DB
-	windowDays int
-	log        *slog.Logger
-	metrics    *metrics.Metrics
+	store              usageStore
+	tenantID           string
+	accountID          string
+	windowDays         int
+	minObservationDays int
+	log                *slog.Logger
+	metrics            *metrics.Metrics
 }
 
-// NewEngine creates a new correlation Engine.
-func NewEngine(db *storage.DB, windowDays int, log *slog.Logger, m *metrics.Metrics) *Engine {
+// NewEngine creates a correlation engine scoped to one tenant and AWS account.
+func NewEngine(
+	store usageStore,
+	tenantID, accountID string,
+	windowDays, minObservationDays int,
+	log *slog.Logger,
+	m *metrics.Metrics,
+) *Engine {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Engine{
-		db:         db,
-		windowDays: windowDays,
-		log:        log,
-		metrics:    m,
+		store:              store,
+		tenantID:           tenantID,
+		accountID:          accountID,
+		windowDays:         windowDays,
+		minObservationDays: minObservationDays,
+		log:                log,
+		metrics:            m,
 	}
 }
 
-// Run performs a full correlation analysis for the given role assignments.
-// Results are saved to the database and returned.
-func (e *Engine) Run(ctx context.Context, assignments []scraper.RoleAssignment) ([]Result, error) {
-	timer := time.Now()
-	since := time.Now().AddDate(0, 0, -e.windowDays)
-	now := time.Now()
+// Run correlates successful, denied, and failed usage aggregates with a point-in-time IAM snapshot.
+func (e *Engine) Run(ctx context.Context, snapshot storage.IAMSnapshot) ([]Result, error) {
+	started := time.Now()
+	analyzedAt := started.UTC()
+	observationStart := analyzedAt.AddDate(0, 0, -e.windowDays)
 
-	e.metrics.AnalysisRuns.Inc()
-
-	// Build a map from role ARN/name → assignment for quick lookup.
-	roleMap := make(map[string]scraper.RoleAssignment, len(assignments))
-	for _, a := range assignments {
-		roleMap[a.RoleARN] = a
-		roleMap[a.RoleName] = a
+	if e.metrics != nil {
+		e.metrics.AnalysisRuns.Inc()
 	}
 
-	// Get all roles observed in the OTel window.
-	observedRoles, err := e.db.GetObservedRoles(ctx, since)
+	coverage, err := e.store.GetCollectorCoverage(ctx, observationStart)
 	if err != nil {
-		return nil, fmt.Errorf("getting observed roles: %w", err)
+		return nil, fmt.Errorf("querying collector coverage: %w", err)
+	}
+	coverageStart := coverage.FirstHeartbeat
+	if coverageStart.Before(observationStart) {
+		coverageStart = observationStart
+	}
+	observedDuration := time.Duration(0)
+	if !coverage.FirstHeartbeat.IsZero() && coverageStart.Before(analyzedAt) {
+		observedDuration = analyzedAt.Sub(coverageStart)
+	}
+	requiredDuration := time.Duration(e.minObservationDays) * 24 * time.Hour
+	coverageSufficient := !coverage.FirstHeartbeat.IsZero() && observedDuration >= requiredDuration
+	coverageFresh := !coverage.LastHeartbeat.IsZero() &&
+		!coverage.LastHeartbeat.Before(analyzedAt.Add(-24*time.Hour))
+
+	usageRows, err := e.store.QueryPermissionUsage(ctx, storage.UsageQuery{
+		TenantID:  e.tenantID,
+		AccountID: e.accountID,
+		Since:     observationStart,
+		Until:     analyzedAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("querying permission usage: %w", err)
 	}
 
-	results := make([]Result, 0, len(assignments))
-	processedRoles := make(map[string]bool)
+	roleAliases := make(map[string]int, len(snapshot.Roles)*3)
+	for i, role := range snapshot.Roles {
+		for _, alias := range []string{role.RoleARN, normalizeRoleARN(role.RoleARN), role.RoleName} {
+			if alias != "" {
+				roleAliases[strings.ToLower(alias)] = i
+			}
+		}
+	}
 
-	// Process roles that appear in OTel traces.
-	for _, role := range observedRoles {
-		assignment, ok := roleMap[role]
+	usageByRole := make(map[int]map[string]ActionUsage)
+	for _, row := range usageRows {
+		if row.SuccessfulEvents+row.DeniedEvents+row.FailedEvents == 0 {
+			continue
+		}
+		roleIndex, ok := findRole(roleAliases, row.RoleARN)
 		if !ok {
-			e.log.Warn("role observed in OTel but not found in IAM, skipping", "role", role)
+			e.log.Warn("usage role not found in IAM snapshot", "role", row.RoleARN)
 			continue
 		}
 
-		result, err := e.correlateRole(ctx, assignment, role, since, now)
-		if err != nil {
-			e.log.Warn("failed to correlate role", "role", role, "error", err)
-			continue
+		actionKey := strings.ToLower(row.IAMAction)
+		if usageByRole[roleIndex] == nil {
+			usageByRole[roleIndex] = make(map[string]ActionUsage)
 		}
-
-		results = append(results, result)
-		processedRoles[assignment.RoleARN] = true
-		processedRoles[assignment.RoleName] = true
+		item := usageByRole[roleIndex][actionKey]
+		if item.Action == "" || lessFold(row.IAMAction, item.Action) {
+			item.Action = row.IAMAction
+		}
+		item.SuccessfulEvents += row.SuccessfulEvents
+		item.DeniedEvents += row.DeniedEvents
+		item.FailedEvents += row.FailedEvents
+		if row.SuccessfulEvents > 0 {
+			if !row.FirstSuccess.IsZero() && (item.FirstSuccess.IsZero() || row.FirstSuccess.Before(item.FirstSuccess)) {
+				item.FirstSuccess = row.FirstSuccess
+			}
+			if row.LastSuccess.After(item.LastSuccess) {
+				item.LastSuccess = row.LastSuccess
+			}
+		}
+		usageByRole[roleIndex][actionKey] = item
 	}
 
-	// Process IAM roles with no OTel observations → all privileges are "unused".
-	for _, assignment := range assignments {
-		if processedRoles[assignment.RoleARN] || processedRoles[assignment.RoleName] {
-			continue
+	results := make([]Result, 0, len(usageByRole))
+	for roleIndex, roleUsage := range usageByRole {
+		role := snapshot.Roles[roleIndex]
+		assigned, candidates, unresolved, warnings := inventory(role.Statements)
+
+		usage := make([]ActionUsage, 0, len(roleUsage))
+		observedSuccessful := make([]string, 0, len(roleUsage))
+		var firstRoleSuccess time.Time
+		for _, item := range roleUsage {
+			usage = append(usage, item)
+			if item.SuccessfulEvents > 0 {
+				observedSuccessful = append(observedSuccessful, item.Action)
+			}
+			if !item.FirstSuccess.IsZero() && (firstRoleSuccess.IsZero() || item.FirstSuccess.Before(firstRoleSuccess)) {
+				firstRoleSuccess = item.FirstSuccess
+			}
+		}
+		sort.Slice(usage, func(i, j int) bool { return lessFold(usage[i].Action, usage[j].Action) })
+		roleObservedDuration := time.Duration(0)
+		if !firstRoleSuccess.IsZero() && firstRoleSuccess.Before(analyzedAt) {
+			roleObservedDuration = analyzedAt.Sub(firstRoleSuccess)
+		}
+		roleObservationSufficient := roleObservedDuration >= requiredDuration
+		effectiveObservedDuration := observedDuration
+		if roleObservedDuration < effectiveObservedDuration {
+			effectiveObservedDuration = roleObservedDuration
+		}
+
+		used, unused, observedUnresolved, correlationWarnings := analyzePrivileges(assigned, candidates, observedSuccessful)
+		unresolved = append(unresolved, observedUnresolved...)
+		warnings = append(warnings, correlationWarnings...)
+		if !coverageSufficient || !coverageFresh || !roleObservationSufficient {
+			unresolved = append(unresolved, unused...)
+			unused = nil
+			if !coverageFresh {
+				warnings = append(warnings, "collector coverage is stale; last heartbeat is older than 24 hours; unused candidates suppressed")
+			} else {
+				warnings = append(warnings, fmt.Sprintf(
+					"observed collection duration is %.1f days; required duration is %d days; unused candidates suppressed",
+					effectiveObservedDuration.Hours()/24,
+					e.minObservationDays,
+				))
+			}
+		}
+
+		assigned = dedupeSortedFold(assigned)
+		used = dedupeSortedFold(used)
+		unused = dedupeSortedFold(unused)
+		unresolved = dedupeSortedFold(unresolved)
+		warnings = dedupeSortedFold(warnings)
+
+		riskInputs := append(append([]string(nil), unused...), unresolved...)
+		iamRole := role.RoleARN
+		if iamRole == "" {
+			iamRole = role.RoleName
 		}
 		result := Result{
-			IAMRole:    assignment.RoleARN,
-			Assigned:   assignment.Privileges,
-			Used:       []string{},
-			Unused:     assignment.Privileges,
-			RiskLevel:  string(ClassifySet(assignment.Privileges)),
-			AnalyzedAt: now,
+			AccountID:        e.accountID,
+			IAMRole:          iamRole,
+			Assigned:         assigned,
+			Used:             used,
+			Unused:           unused,
+			Unresolved:       unresolved,
+			Warnings:         warnings,
+			Usage:            usage,
+			ObservationStart: observationStart,
+			AnalyzedAt:       analyzedAt,
+			RiskLevel:        string(ClassifySet(riskInputs)),
 		}
 		results = append(results, result)
-		if err := e.saveResult(ctx, result); err != nil {
-			e.log.Warn("failed to save analysis result", "role", assignment.RoleARN, "error", err)
+	}
+
+	sort.Slice(results, func(i, j int) bool { return lessFold(results[i].IAMRole, results[j].IAMRole) })
+	if e.metrics != nil {
+		var candidateCount, unresolvedCount int
+		for _, result := range results {
+			candidateCount += len(result.Unused)
+			unresolvedCount += len(result.Unresolved)
 		}
+		e.metrics.CandidatePermissions.Set(float64(candidateCount))
+		e.metrics.UnresolvedPermissions.Set(float64(unresolvedCount))
+		e.metrics.AnalysisDuration.Observe(time.Since(started).Seconds())
 	}
-
-	// Update metrics.
-	for _, r := range results {
-		e.metrics.UnusedPrivileges.WithLabelValues(r.IAMRole, r.RiskLevel).Set(float64(len(r.Unused)))
-	}
-
-	elapsed := time.Since(timer).Seconds()
-	e.metrics.AnalysisDuration.Observe(elapsed)
 	e.log.Info("correlation analysis complete",
 		"roles_analyzed", len(results),
-		"duration_s", elapsed,
+		"duration_s", time.Since(started).Seconds(),
 	)
-
 	return results, nil
 }
 
-func (e *Engine) correlateRole(
-	ctx context.Context,
-	assignment scraper.RoleAssignment,
-	observedRole string,
-	since, now time.Time,
-) (Result, error) {
-	usedRaw, err := e.db.GetUsedPrivilegesForRole(ctx, observedRole, since)
-	if err != nil {
-		return Result{}, fmt.Errorf("getting used privileges: %w", err)
-	}
+func inventory(statements []storage.IAMPolicyStatement) (assigned, candidates, unresolved, warnings []string) {
+	for _, statement := range statements {
+		isBoundary := strings.EqualFold(statement.Origin, storage.IAMStatementOriginBoundary)
+		isIdentity := strings.EqualFold(statement.Origin, storage.IAMStatementOriginManaged) ||
+			strings.EqualFold(statement.Origin, storage.IAMStatementOriginInline)
+		isAllow := strings.EqualFold(statement.Effect, "Allow")
 
-	// Map SDK operation names to IAM action names.
-	used := make([]string, 0, len(usedRaw))
-	for _, p := range usedRaw {
-		used = append(used, MapSDKToIAM(p))
-	}
+		if isBoundary {
+			warnings = append(warnings, "permissions boundary statements constrain but do not grant permissions")
+		}
+		if strings.EqualFold(statement.Effect, "Deny") {
+			warnings = append(warnings, "Deny statement semantics may constrain assigned permissions")
+		}
+		if len(statement.NotActions) > 0 {
+			warnings = append(warnings, "NotAction statement semantics cannot be resolved to exact grants")
+		}
+		if strings.TrimSpace(statement.ConditionJSON) != "" {
+			warnings = append(warnings, "condition semantics may constrain assigned permissions")
+		}
 
-	unused := setDifference(assignment.Privileges, used)
-	riskLevel := ClassifySet(unused)
-
-	result := Result{
-		IAMRole:    observedRole,
-		Assigned:   assignment.Privileges,
-		Used:       used,
-		Unused:     unused,
-		RiskLevel:  string(riskLevel),
-		AnalyzedAt: now,
-	}
-
-	if err := e.saveResult(ctx, result); err != nil {
-		e.log.Warn("failed to save analysis result", "role", observedRole, "error", err)
-	}
-
-	return result, nil
-}
-
-func (e *Engine) saveResult(ctx context.Context, r Result) error {
-	return e.db.SaveAnalysisResult(ctx, storage.AnalysisResult{
-		AnalysisDate:  r.AnalyzedAt,
-		IAMRole:       r.IAMRole,
-		AssignedPrivs: r.Assigned,
-		UsedPrivs:     r.Used,
-		UnusedPrivs:   r.Unused,
-		RiskLevel:     r.RiskLevel,
-	})
-}
-
-// setDifference computes assigned - used, respecting wildcard matching.
-// A privilege from assigned is considered "used" if:
-//   - It exactly matches a used privilege
-//   - It is a wildcard "svc:*" and any "svc:X" was observed
-//   - It is "*" (global wildcard) and any privilege was observed
-//   - A used privilege is a wildcard that covers it
-func setDifference(assigned, used []string) []string {
-	if len(assigned) == 0 {
-		return nil
-	}
-
-	usedSet := make(map[string]struct{}, len(used))
-	for _, u := range used {
-		usedSet[u] = struct{}{}
-	}
-
-	var unused []string
-	for _, a := range assigned {
-		if isPrivilegeUsed(a, used, usedSet) {
+		if !isIdentity || !isAllow {
 			continue
 		}
-		unused = append(unused, a)
+		if len(statement.NotActions) > 0 {
+			unresolved = append(unresolved, statement.NotActions...)
+			continue
+		}
+		hasCondition := strings.TrimSpace(statement.ConditionJSON) != ""
+		for _, action := range statement.Actions {
+			assigned = append(assigned, action)
+			if hasCondition || hasWildcard(action) {
+				unresolved = append(unresolved, action)
+			} else {
+				candidates = append(candidates, action)
+			}
+		}
 	}
-	return unused
+	return assigned, candidates, unresolved, warnings
 }
 
-// isPrivilegeUsed checks whether an assigned privilege is covered by the used set.
-func isPrivilegeUsed(assigned string, used []string, usedSet map[string]struct{}) bool {
-	// Direct match.
-	if _, ok := usedSet[assigned]; ok {
-		return true
-	}
-
-	aParts := strings.SplitN(assigned, ":", 2)
-	aService := ""
-	aAction := assigned
-	if len(aParts) == 2 {
-		aService = aParts[0]
-		aAction = aParts[1]
-	}
-
-	// Global wildcard: used if ANY privilege was observed.
-	if assigned == "*" {
-		return len(used) > 0
-	}
-
-	// Service wildcard "svc:*": used if any "svc:X" was observed.
-	if aAction == "*" {
-		for _, u := range used {
-			uParts := strings.SplitN(u, ":", 2)
-			if len(uParts) == 2 && strings.EqualFold(uParts[0], aService) {
-				return true
-			}
+// analyzePrivileges separates successful observations and exact unused candidates.
+func analyzePrivileges(assigned, candidates, observed []string) (used, unused, unresolved, warnings []string) {
+	var uncovered []string
+	for _, action := range dedupeSortedFold(observed) {
+		if isCovered(action, assigned) {
+			used = append(used, action)
+			continue
 		}
-		return false
+		uncovered = append(uncovered, action)
+		unresolved = append(unresolved, action)
 	}
 
-	// Check if any used privilege is a wildcard that covers this action.
-	for _, u := range used {
-		if u == "*" {
+	unused = setDifference(candidates, used)
+	if len(uncovered) > 0 {
+		unresolved = append(unresolved, unused...)
+		unused = []string{}
+		warnings = append(warnings, fmt.Sprintf(
+			"%d successful observed action(s) are not covered by identity Allow actions; unused candidates suppressed",
+			len(uncovered),
+		))
+	}
+	return used, unused, unresolved, warnings
+}
+
+// setDifference returns exact assigned actions that were not successfully observed.
+func setDifference(assigned, used []string) []string {
+	usedSet := make(map[string]struct{}, len(used))
+	for _, action := range used {
+		usedSet[strings.ToLower(action)] = struct{}{}
+	}
+
+	unused := make([]string, 0, len(assigned))
+	for _, action := range assigned {
+		if hasWildcard(action) {
+			continue
+		}
+		if _, ok := usedSet[strings.ToLower(action)]; !ok {
+			unused = append(unused, action)
+		}
+	}
+	return dedupeSortedFold(unused)
+}
+
+func findRole(roleMap map[string]int, observedRole string) (int, bool) {
+	for _, alias := range []string{observedRole, normalizeRoleARN(observedRole), roleNameFromARN(observedRole)} {
+		if role, ok := roleMap[strings.ToLower(alias)]; ok {
+			return role, true
+		}
+	}
+	return 0, false
+}
+
+// normalizeRoleARN converts an STS assumed-role ARN to its IAM role ARN.
+func normalizeRoleARN(role string) string {
+	parts := strings.SplitN(role, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "sts" || !strings.HasPrefix(parts[5], "assumed-role/") {
+		return role
+	}
+	assumedRole := strings.TrimPrefix(parts[5], "assumed-role/")
+	separator := strings.LastIndexByte(assumedRole, '/')
+	if separator <= 0 || separator == len(assumedRole)-1 {
+		return role
+	}
+	return fmt.Sprintf("arn:%s:iam::%s:role/%s", parts[1], parts[4], assumedRole[:separator])
+}
+
+func roleNameFromARN(role string) string {
+	normalized := normalizeRoleARN(role)
+	parts := strings.SplitN(normalized, ":", 6)
+	if len(parts) != 6 || parts[2] != "iam" || !strings.HasPrefix(parts[5], "role/") {
+		return normalized
+	}
+	resource := strings.TrimPrefix(parts[5], "role/")
+	if separator := strings.LastIndexByte(resource, '/'); separator >= 0 {
+		return resource[separator+1:]
+	}
+	return resource
+}
+
+func isCovered(action string, assigned []string) bool {
+	for _, pattern := range assigned {
+		if matchPrivilege(pattern, action) {
 			return true
 		}
-		uParts := strings.SplitN(u, ":", 2)
-		if len(uParts) == 2 {
-			if strings.EqualFold(uParts[0], aService) && uParts[1] == "*" {
-				return true
+	}
+	return false
+}
+
+func hasWildcard(action string) bool {
+	return strings.ContainsAny(action, "*?")
+}
+
+// matchPrivilege implements case-insensitive IAM-style '*' and '?' matching.
+func matchPrivilege(pattern, action string) bool {
+	pattern = strings.ToLower(pattern)
+	action = strings.ToLower(action)
+
+	matched := make([]bool, len(action)+1)
+	matched[0] = true
+	for i := 0; i < len(pattern); i++ {
+		next := make([]bool, len(action)+1)
+		switch pattern[i] {
+		case '*':
+			next[0] = matched[0]
+			for j := 1; j <= len(action); j++ {
+				next[j] = matched[j] || next[j-1]
+			}
+		case '?':
+			for j := 1; j <= len(action); j++ {
+				next[j] = matched[j-1]
+			}
+		default:
+			for j := 1; j <= len(action); j++ {
+				next[j] = matched[j-1] && pattern[i] == action[j-1]
 			}
 		}
+		matched = next
 	}
+	return matched[len(action)]
+}
 
-	return false
+func dedupeSortedFold(values []string) []string {
+	unique := make(map[string]string, len(values))
+	for _, value := range values {
+		key := strings.ToLower(value)
+		if existing, ok := unique[key]; !ok || lessFold(value, existing) {
+			unique[key] = value
+		}
+	}
+	result := make([]string, 0, len(unique))
+	for _, value := range unique {
+		result = append(result, value)
+	}
+	sort.Slice(result, func(i, j int) bool { return lessFold(result[i], result[j]) })
+	return result
+}
+
+func lessFold(left, right string) bool {
+	leftFold, rightFold := strings.ToLower(left), strings.ToLower(right)
+	if leftFold == rightFold {
+		return left < right
+	}
+	return leftFold < rightFold
 }

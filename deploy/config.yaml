@@ -1,0 +1,25 @@
+otel:
+  endpoint: "0.0.0.0:4318"
+  role_attribute: "aws.iam.role.arn"
+  auth_token: "shinkai-dev-otlp-token"
+
+aws:
+  region: "us-east-1"
+  account_id: ""
+
+observation:
+  window_days: 30
+  min_observation_days: 7
+
+clickhouse:
+  addresses: ["clickhouse:9000"]
+  database: "shinkai_shoujo"
+  username: "shinkai"
+  password: "shinkai-dev-password"
+  secure: false
+  dial_timeout: "5s"
+  retention_days: 90
+
+http:
+  endpoint: "0.0.0.0:9090"
+  auth_token: "shinkai-dev-api-token"

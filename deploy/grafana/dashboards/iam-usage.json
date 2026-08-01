@@ -1,0 +1,96 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "shinkai-clickhouse"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "sql", "rawSql": "SELECT uniqExact(event_id) AS value FROM usage_events WHERE outcome = 'success' AND $__timeFilter(event_time)", "refId": "A"}],
+      "title": "Successful AWS calls",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "shinkai-clickhouse"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "sql", "rawSql": "SELECT uniqExact(event_id) AS value FROM usage_events WHERE outcome = 'denied' AND $__timeFilter(event_time)", "refId": "A"}],
+      "title": "Denied AWS calls",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "shinkai-clickhouse"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "sql", "rawSql": "SELECT uniqExact(role_arn) AS value FROM usage_events WHERE $__timeFilter(event_time)", "refId": "A"}],
+      "title": "Observed IAM roles",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "shinkai-clickhouse"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "sql", "rawSql": "SELECT uniqExact(iam_action) AS value FROM usage_events WHERE outcome = 'success' AND $__timeFilter(event_time)", "refId": "A"}],
+      "title": "Observed IAM actions",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "shinkai-clickhouse"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 5},
+      "id": 5,
+      "options": {"legend": {"calcs": ["sum"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorType": "sql", "format": 0, "queryType": "sql", "rawSql": "SELECT $__timeInterval(event_time) AS time, iam_action AS metric, uniqExact(event_id) AS value FROM usage_events WHERE outcome = 'success' AND $__timeFilter(event_time) GROUP BY time, metric ORDER BY time", "refId": "A"}],
+      "title": "Permission usage frequency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "shinkai-clickhouse"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 14},
+      "id": 6,
+      "options": {"showHeader": true},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "sql", "rawSql": "SELECT account_id, role_arn, iam_action, uniqExactIf(event_id, outcome = 'success') AS successful_calls, uniqExactIf(event_id, outcome = 'denied') AS denied_calls, minIf(event_time, outcome = 'success') AS first_success, maxIf(event_time, outcome = 'success') AS last_success FROM usage_events WHERE $__timeFilter(event_time) GROUP BY account_id, role_arn, iam_action ORDER BY last_success DESC", "refId": "A"}],
+      "title": "Usage, frequency, and recency",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "shinkai-clickhouse"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 10, "w": 16, "x": 0, "y": 23},
+      "id": 7,
+      "options": {"showHeader": true},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "sql", "rawSql": "WITH latest AS (SELECT account_id AS account_id, argMax(snapshot_id, collected_at) AS snapshot_id FROM iam_snapshots GROUP BY account_id), enrolled AS (SELECT DISTINCT account_id AS account_id, role_arn AS role_arn FROM usage_events), coverage AS (SELECT min(heartbeat_time) AS first_heartbeat, max(heartbeat_time) AS last_heartbeat FROM collector_heartbeats WHERE $__timeFilter(heartbeat_time)), grants AS (SELECT s.account_id AS account_id, s.role_arn AS role_arn, arrayJoin(s.actions) AS action, any(s.policy_name) AS policy_name FROM iam_policy_statements AS s INNER JOIN latest AS l ON s.account_id = l.account_id AND s.snapshot_id = l.snapshot_id INNER JOIN enrolled AS e ON s.account_id = e.account_id AND s.role_arn = e.role_arn WHERE lowerUTF8(s.effect) = 'allow' AND s.origin IN ('managed', 'inline') AND position(action, '*') = 0 AND position(action, '?') = 0 AND empty(s.condition_json) GROUP BY account_id, role_arn, action), observed AS (SELECT account_id AS account_id, role_arn AS role_arn, lowerUTF8(iam_action) AS action_key, uniqExact(event_id) AS calls, max(event_time) AS last_success FROM usage_events WHERE outcome = 'success' AND $__timeFilter(event_time) GROUP BY account_id, role_arn, action_key) SELECT g.account_id, g.role_arn, g.action AS candidate_unused, g.policy_name, ifNull(o.calls, 0) AS observed_calls, o.last_success FROM grants AS g LEFT JOIN observed AS o ON g.account_id = o.account_id AND g.role_arn = o.role_arn AND lowerUTF8(g.action) = o.action_key CROSS JOIN coverage AS c WHERE ifNull(o.calls, 0) = 0 AND dateDiff('day', c.first_heartbeat, c.last_heartbeat) >= ${min_observation_days:raw} ORDER BY g.role_arn, candidate_unused", "refId": "A"}],
+      "title": "Exact unobserved candidates after minimum coverage",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "shinkai-clickhouse"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 10, "w": 8, "x": 16, "y": 23},
+      "id": 8,
+      "options": {"showHeader": true},
+      "targets": [{"editorType": "sql", "format": 1, "queryType": "sql", "rawSql": "WITH latest AS (SELECT account_id, argMax(snapshot_id, collected_at) AS snapshot_id FROM iam_snapshots GROUP BY account_id) SELECT s.account_id, s.role_arn, arrayJoin(s.actions) AS unresolved_pattern, s.policy_name FROM iam_policy_statements AS s INNER JOIN latest AS l ON s.account_id = l.account_id AND s.snapshot_id = l.snapshot_id WHERE lowerUTF8(s.effect) = 'allow' AND s.origin IN ('managed', 'inline') AND (position(unresolved_pattern, '*') > 0 OR position(unresolved_pattern, '?') > 0) ORDER BY s.role_arn, unresolved_pattern", "refId": "A"}],
+      "title": "Unresolved wildcard grants",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["aws", "iam", "opentelemetry", "shinkai"],
+  "templating": {"list": [{"current": {"selected": true, "text": "7", "value": "7"}, "hide": 0, "label": "Minimum observation days", "name": "min_observation_days", "options": [{"selected": false, "text": "2", "value": "2"}, {"selected": true, "text": "7", "value": "7"}, {"selected": false, "text": "14", "value": "14"}, {"selected": false, "text": "30", "value": "30"}], "query": "2,7,14,30", "type": "custom"}]},
+  "time": {"from": "now-30d", "to": "now"},
+  "timezone": "browser",
+  "title": "Shinkai Shoujo IAM Usage",
+  "uid": "shinkai-iam-usage",
+  "version": 1
+}

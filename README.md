@@ -1,766 +1,137 @@
-# Shinkai Shoujo (深海少女)
-## Deep Sea Girl - Agentless AWS IAM Privilege Correlation
+# Shinkai Shoujo
 
-<div align="center">
+CloudTrail-free AWS IAM usage observability from dedicated OpenTelemetry events.
 
-![Version](https://img.shields.io/badge/version-1.0.0-39C5BB)
-![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)
-![License](https://img.shields.io/badge/license-Apache--2.0-blue)
-![AWS](https://img.shields.io/badge/AWS-IAM-FF9900?logo=amazon-aws)
+Shinkai receives one OTel log event for each AWS SDK operation performed by an application, stores those events in ClickHouse, snapshots the application's assigned IAM policies through read-only IAM APIs, and exposes usage, inventory, and conservative correlation results to Grafana and HTTP clients.
 
-  <img src="https://static.wikia.nocookie.net/vocaloid/images/a/a7/%E6%B7%B1%E6%B5%B7%E5%B0%91%E5%A5%B3_-deep_sea_girl-.png/revision/latest?cb=20221216124014" alt="Deep Sea Girl" width="500" />
+## Scope
 
-*"Deep sea girl, pulled by her arm... The marine snow sings a song of blessing"*
+Shinkai answers application-level questions:
 
-**Stop guessing which IAM privileges you actually need.**
+- Which IAM actions did this workload successfully use?
+- How often did it use each action?
+- When was each action first and last observed?
+- Which assigned exact actions were not observed in the selected window?
+- Which grants remain unresolved because they contain wildcards, `NotAction`, conditions, boundaries, or other IAM semantics?
+- Which operations were denied or failed?
 
-[Quick Start](#quick-start) • [How It Works](#how-it-works) • [Installation](#installation)
-</div>
-
----
-
-## The Problem
-
-Your AWS IAM roles have **hundreds of permissions**.
-
-But you only **use 10%** of them.
-
-The other 90%? **Attack surface.**
-
-```terraform
-# What you have
-resource "aws_iam_role_policy_attachment" "app" {
-  role       = "MyAppRole"
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"  # 🔴 WAY too much
-}
-
-# What you actually need
-resource "aws_iam_policy" "app_minimal" {
-  policy = jsonencode({
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "s3:GetObject",      # ✅ Used 3,421 times
-        "s3:PutObject"       # ✅ Used 234 times
-      ]
-      Resource = "arn:aws:s3:::my-bucket/*"
-    }]
-  })
-}
-```
-
-**The difference?**
-- Before: Attacker can delete your entire S3 account
-- After: Attacker can only read/write one bucket
-
----
-
-## The Solution
-
-**Shinkai Shoujo** finds unused IAM privileges by analyzing your **existing OpenTelemetry traces**.
-
-### Zero agents. Zero deployment. Just insights.
-
-```bash
-# 1. Point Shinkai at your OTel collector
-$ shinkai-shoujo configure --otel-endpoint http://localhost:4318
-
-# 2. Run weekly analysis
-$ shinkai-shoujo analyze
-
-# 3. Get Terraform to fix it
-$ shinkai-shoujo generate terraform --output cleanup.tf
-
-✨ Done. You now have least-privilege IAM.
-```
-
----
-
-## Philosophy
-
-**The name comes from "Deep Sea Girl" (深海少女) for Hatsune Miku.**
-
-A song about finding your true identity after losing it in the depths.
-
-**Similarly, Shinkai Shoujo helps your infrastructure find its true identity:**
-- Discovering what privileges are actually needed
-- Removing what doesn't belong
-- Revealing the minimal viable permission set
-
-**Like marine snow falling through the ocean,** telemetry data quietly accumulates, revealing the truth beneath the surface.
-
----
-
-## How It Works
-
-```mermaid
-graph LR
-    A[Your Apps<br/>Already instrumented] -->|OTel Traces| B[OTel Collector<br/>Already running]
-    B -->|OTLP| C[Shinkai Shoujo]
-    D[AWS IAM API<br/>Read-only] -->|Assigned privileges| C
-    C -->|Compare| E[SQLite DB]
-    E --> F[Terraform Output<br/>Least privilege IAM]
-    
-    style A fill:#95e1d3
-    style B fill:#4ecdc4
-    style C fill:#ff6b6b
-    style F fill:#ffd93d
-```
-
-### The Magic
-
-**Your AWS SDKs already emit OpenTelemetry traces:**
-
-```json
-{
-  "name": "S3.GetObject",
-  "attributes": {
-    "aws.service": "s3",
-    "aws.operation": "GetObject",
-    "aws.region": "us-east-1"
-  },
-  "resource": {
-    "aws.iam.role": "arn:aws:iam::123:role/MyAppRole"
-  }
-}
-```
-
-**Shinkai Shoujo:**
-1. Collects these traces (you're already sending them)
-2. Queries AWS IAM for assigned privileges
-3. Compares: `assigned - used = unused`
-4. Generates Terraform to remove the unused ones
-
-**No agents. No eBPF. No kernel access. Just data correlation.**
-
----
-
-## Features
-
-### ✨ Agentless
-- Works with existing OTel infrastructure
-- No deployment to production instances
-- No kernel requirements
-- No privileges beyond IAM read
-
-### 🎯 Accurate
-- Based on real API calls (not heuristics)
-- Configurable observation window (default: 7 days)
-- Handles scheduled jobs (monthly backups, quarterly reports)
-- Excludes new roles until sufficient data collected
-
-### 🛡️ Safe
-- Read-only IAM access
-- **Never** modifies IAM automatically
-- Generates Terraform for manual review
-- GitOps-friendly workflow
-
-### 🚀 Fast
-- Single Go binary
-- SQLite storage (no database to manage)
-- Weekly batch processing
-- Sub-second queries
-
-### 📊 Observable
-- Prometheus metrics
-- Structured logging
-- Web UI for browsing results
-- CLI for automation
-
----
-
-## Quick Start
-
-### Prerequisites
-
-```bash
-# 1. Your apps already export OTel traces (check this)
-$ curl http://localhost:4318/v1/traces
-# Should return 200 OK
-
-# 2. You have AWS credentials with IAM read access
-$ aws iam list-roles --max-items 1
-# Should list a role
-```
-
-### Install
-
-```bash
-# Download latest release
-$ curl -L https://github.com/0xKirisame/shinkai-shoujo/releases/latest/download/shinkai-shoujo-linux-amd64 -o shinkai-shoujo
-$ chmod +x shinkai-shoujo
-$ sudo mv shinkai-shoujo /usr/local/bin/
-
-# Or build from source
-$ git clone https://github.com/0xKirisame/shinkai-shoujo
-$ cd shinkai-shoujo
-$ go build -o shinkai-shoujo cmd/shinkai-shoujo/main.go
-```
-
-### Configure
-
-```bash
-# Create config
-$ shinkai-shoujo init
-
-# Edit config
-$ cat > ~/.shinkai-shoujo/config.yaml << EOF
-otel:
-  endpoint: "http://localhost:4318"  # Your OTel collector
-  
-aws:
-  region: "us-east-1"
-  # Uses default credential chain (env vars, ~/.aws/credentials, IAM role)
-  
-observation:
-  window_days: 7
-  min_observation_days: 2  # Exclude roles newer than this
-  
-storage:
-  path: "~/.shinkai-shoujo/shinkai.db"
-EOF
-```
-
-### Run Analysis
-
-```bash
-# One-time analysis
-$ shinkai-shoujo analyze
-
-╔════════════════════════════════════════════════════════════════╗
-║ Shinkai Shoujo - Analysis Complete                             ║
-╚════════════════════════════════════════════════════════════════╝
-
-📊 Summary (7-day observation window)
-
-Total IAM Roles Analyzed: 47
-  ├─ Over-privileged: 38 (81%)
-  ├─ Properly scoped: 7 (15%)
-  └─ Unused (no activity): 2 (4%)
-
-Total Unused Privileges Found: 1,247
-  ├─ HIGH RISK (Delete*/Terminate*): 23
-  ├─ MEDIUM RISK (Create*/Modify*): 456
-  └─ LOW RISK (Describe*/List*): 768
-
-Potential Attack Surface Reduction: 68%
-
-💾 Results saved to: /home/user/.shinkai-shoujo/reports/2025-02-16.json
-
-Next steps:
-  1. Review: shinkai-shoujo report --latest
-  2. Generate Terraform: shinkai-shoujo generate terraform
-  3. Apply changes via GitOps
-```
-
-### Generate Terraform
-
-```bash
-$ shinkai-shoujo generate terraform --output cleanup.tf
-
-# Creates cleanup.tf with:
-# - New minimal policies
-# - Attachments for each role
-# - Comments with usage stats
-# - Safety warnings
-
-$ cat cleanup.tf
-```
-
-```terraform
-# Generated by Shinkai Shoujo - 2025-02-16
-# ⚠️  REVIEW CAREFULLY - Test in staging first!
-# 
-# Observation window: 7 days (2025-02-09 to 2025-02-16)
-# Roles analyzed: 47
-# Unused privileges removed: 1,247
-
-# ============================================================
-# Role: WebServerRole
-# Current: AmazonS3FullAccess (13 privileges)
-# Used: 2 privileges (15%)
-# Unused: 11 privileges (85%)
-# ============================================================
-
-resource "aws_iam_policy" "webserver_least_privilege" {
-  name        = "WebServerLeastPrivilege"
-  description = "Generated by Shinkai Shoujo - Only privileges actually used"
-  
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "s3:GetObject",      # Used: 3,421 calls over 7 days
-        "s3:PutObject",      # Used: 234 calls over 7 days
-      ]
-      Resource = "arn:aws:s3:::my-app-bucket/*"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "webserver_new" {
-  role       = "WebServerRole"
-  policy_arn = aws_iam_policy.webserver_least_privilege.arn
-}
-
-# TODO: After testing in staging, remove old policy:
-# resource "aws_iam_role_policy_attachment" "webserver_old" {
-#   role       = "WebServerRole"
-#   policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-# }
-# 
-# Privileges that will be REMOVED (unused in 7 days):
-#   🔴 s3:DeleteBucket           HIGH RISK - Destructive
-#   🔴 s3:DeleteObject           HIGH RISK - Destructive
-#   🟡 s3:PutBucketPolicy        MEDIUM RISK
-#   🟡 s3:PutBucketAcl           MEDIUM RISK
-#   ... (7 more)
-
-# ============================================================
-# Role: DataPipelineRole
-# ... (similar for each over-privileged role)
-# ============================================================
-```
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/0xKirisame/shinkai-shoujo
-cd shinkai-shoujo
-go build -o shinkai-shoujo cmd/shinkai-shoujo/main.go
-```
-
----
-
-## Configuration
-
-### Minimal Config
-
-```yaml
-# ~/.shinkai-shoujo/config.yaml
-
-otel:
-  endpoint: "http://localhost:4318"
-
-aws:
-  region: "us-east-1"
-```
-
-### Full Config
-
-```yaml
-otel:
-  endpoint: "http://localhost:4318"
-  timeout: "30s"
-  
-  # Optional: Filter which traces to analyze
-  filters:
-    services: ["my-app", "my-api"]  # Only these services
-    # namespaces: ["production"]    # Only this namespace
-
-aws:
-  region: "us-east-1"
-  # profile: "default"  # Optional: specific AWS profile
-  
-observation:
-  window_days: 7           # Look back 7 days
-  min_observation_days: 2  # Ignore roles created < 2 days ago
-  
-  # Exclude specific patterns from "unused" detection
-  exclusions:
-    privileges:
-      - "s3:PutObject:backup-*"       # Monthly backups
-      - "lambda:InvokeFunction:quarterly-*"  # Quarterly jobs
-    roles:
-      - "arn:aws:iam::123:role/EmergencyBreakGlass"
-
-storage:
-  path: "~/.shinkai-shoujo/shinkai.db"
-  retention_days: 90  # Keep reports for 90 days
-
-output:
-  format: "terraform"  # or "json", "yaml"
-  risk_warnings: true  # Flag destructive privileges
-  
-logging:
-  level: "info"  # debug, info, warn, error
-  format: "json"
-  
-metrics:
-  enabled: true
-  port: 9090
-  
-web:
-  enabled: false  # Enable web UI
-  port: 8080
-  auth:
-    username: "admin"
-    password_hash: "$2a$10$..."  # bcrypt
-```
-
----
-
-## Usage
-
-### CLI Commands
-
-```bash
-# One-time analysis
-shinkai-shoujo analyze
-
-# View latest report
-shinkai-shoujo report --latest
-
-# View specific role
-shinkai-shoujo report --role WebServerRole
-
-# Generate Terraform
-shinkai-shoujo generate terraform --output cleanup.tf
-
-# Generate JSON
-shinkai-shoujo generate json --output report.json
-
-# Run as daemon (continuous collection)
-shinkai-shoujo daemon --interval 7d
-
-# Web UI
-shinkai-shoujo web --port 8080
-```
-
-### Systemd Service (Recommended)
-
-```bash
-# /etc/systemd/system/shinkai-shoujo.service
-[Unit]
-Description=Shinkai Shoujo IAM Privilege Analyzer
-After=network.target
-
-[Service]
-Type=simple
-User=shinkai
-ExecStart=/usr/local/bin/shinkai-shoujo daemon --config /etc/shinkai-shoujo/config.yaml
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable --now shinkai-shoujo
-sudo systemctl status shinkai-shoujo
-```
-
-### Kubernetes CronJob
-
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: shinkai-shoujo
-spec:
-  schedule: "0 2 * * 0"  # Every Sunday 2 AM
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-          - name: shinkai-shoujo
-            image: 0xkirisame/shinkai-shoujo:latest
-            args: ["analyze"]
-            env:
-            - name: AWS_REGION
-              value: "us-east-1"
-            volumeMounts:
-            - name: config
-              mountPath: /etc/shinkai-shoujo
-          volumes:
-          - name: config
-            configMap:
-              name: shinkai-shoujo-config
-          restartPolicy: OnFailure
-```
-
----
-
-## OpenTelemetry Setup
-
-**Most AWS SDKs auto-instrument with minimal code changes.**
-
-### Python (boto3)
-
-```python
-# requirements.txt
-opentelemetry-api
-opentelemetry-sdk
-opentelemetry-exporter-otlp
-opentelemetry-instrumentation-boto3core
-
-# app.py
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.instrumentation.boto3core import Boto3coreInstrumentor
-
-# Set up OTel
-trace.set_tracer_provider(TracerProvider())
-trace.get_tracer_provider().add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces"))
-)
-
-# Instrument boto3
-Boto3coreInstrumentor().instrument()
-
-# That's it! All boto3 calls now traced.
-import boto3
-s3 = boto3.client('s3')
-s3.get_object(Bucket='my-bucket', Key='file.txt')  # Automatically traced
-```
-
-### Node.js (aws-sdk)
-
-```javascript
-// package.json
-{
-  "dependencies": {
-    "@opentelemetry/api": "^1.0.0",
-    "@opentelemetry/sdk-node": "^0.35.0",
-    "@opentelemetry/instrumentation-aws-sdk": "^0.35.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.35.0"
-  }
-}
-
-// tracing.js
-const { NodeSDK } = require('@opentelemetry/sdk-node');
-const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-http');
-const { AwsInstrumentation } = require('@opentelemetry/instrumentation-aws-sdk');
-
-const sdk = new NodeSDK({
-  traceExporter: new OTLPTraceExporter({
-    url: 'http://localhost:4318/v1/traces'
-  }),
-  instrumentations: [new AwsInstrumentation()]
-});
-
-sdk.start();
-
-// app.js
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
-const s3 = new S3Client({ region: 'us-east-1' });
-
-// Automatically traced
-await s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: 'file.txt' }));
-```
-
-### Go (aws-sdk-go-v2)
-
-```go
-package main
-
-import (
-    "context"
-    "github.com/aws/aws-sdk-go-v2/config"
-    "github.com/aws/aws-sdk-go-v2/service/s3"
-    "go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
-    "go.opentelemetry.io/otel"
-    "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
-    "go.opentelemetry.io/otel/sdk/trace"
-)
-
-func main() {
-    // Set up OTel
-    exporter, _ := otlptracehttp.New(context.Background(),
-        otlptracehttp.WithEndpoint("localhost:4318"),
-        otlptracehttp.WithInsecure(),
-    )
-    tp := trace.NewTracerProvider(trace.WithBatcher(exporter))
-    otel.SetTracerProvider(tp)
-    
-    // Load AWS config
-    cfg, _ := config.LoadDefaultConfig(context.Background())
-    
-    // Instrument AWS SDK
-    otelaws.AppendMiddlewares(&cfg.APIOptions)
-    
-    // All AWS calls now traced
-    s3Client := s3.NewFromConfig(cfg)
-    s3Client.GetObject(context.Background(), &s3.GetObjectInput{
-        Bucket: aws.String("my-bucket"),
-        Key:    aws.String("file.txt"),
-    })
-}
-```
-
----
+It does not use CloudTrail. It intentionally does not observe console activity, CLI activity, uninstrumented callers, or AWS-managed service-to-service behavior.
 
 ## Architecture
 
-### Components
+```text
+Application AWS SDK middleware
+  -> dedicated OTel log event
+  -> OTel Collector logs pipeline
+  -> Shinkai OTLP/HTTP receiver
+  -> ClickHouse raw events and hourly aggregates
 
-```mermaid
-graph TB
-    subgraph "Your Infrastructure (Unchanged)"
-        APP1[Python App<br/>boto3 + OTel]
-        APP2[Node App<br/>aws-sdk + OTel]
-        APP3[Go App<br/>aws-sdk-v2 + OTel]
-        LAMBDA[Lambda Functions<br/>Auto-instrumented]
-    end
-    
-    COLLECTOR[OTel Collector<br/>Already Running]
-    
-    APP1 & APP2 & APP3 & LAMBDA -->|OTLP Traces| COLLECTOR
-    
-    subgraph "Shinkai Shoujo"
-        COLLECTOR -->|OTLP/HTTP| RECEIVER[OTel Receiver<br/>Parse traces]
-        
-        RECEIVER -->|Extract IAM role + API calls| DB[(SQLite<br/>Privilege Usage)]
-        
-        SCRAPER[AWS IAM Scraper<br/>Read-only API]
-        AWS[AWS IAM API] -->|Assigned privileges| SCRAPER
-        
-        SCRAPER -->|Store| DB
-        
-        ENGINE[Correlation Engine<br/>Compare assigned vs used]
-        DB --> ENGINE
-        
-        ENGINE -->|Generate| OUTPUT[Output]
-    end
-    
-    subgraph "Results"
-        OUTPUT --> TF[cleanup.tf<br/>Terraform]
-        OUTPUT --> JSON[report.json]
-        OUTPUT --> YAML[report.yaml]
-    end
-    
-    subgraph "Manual Review & Apply"
-        TF --> GITOPS[GitOps Pipeline]
-        GITOPS --> APPLY[terraform apply]
-        APPLY -->|Update IAM| AWS
-    end
-    
-    style APP1 fill:#95e1d3,stroke:#333,stroke-width:2px
-    style APP2 fill:#95e1d3,stroke:#333,stroke-width:2px
-    style APP3 fill:#95e1d3,stroke:#333,stroke-width:2px
-    style LAMBDA fill:#95e1d3,stroke:#333,stroke-width:2px
-    style COLLECTOR fill:#4ecdc4,stroke:#333,stroke-width:2px
-    style ENGINE fill:#ff6b6b,stroke:#333,stroke-width:2px,color:#fff
-    style TF fill:#ffd93d,stroke:#333,stroke-width:2px
-    style AWS fill:#FF9900,stroke:#333,stroke-width:2px
+AWS IAM read APIs
+  -> complete immutable identity-policy snapshot
+  -> ClickHouse inventory tables
+
+ClickHouse
+  -> Shinkai JSON query API
+  -> Grafana ClickHouse datasource
 ```
 
-### Database Schema
+Activity and inventory are independent sources:
 
-```sql
--- Privilege usage (from OTel traces)
-CREATE TABLE privilege_usage (
-    id INTEGER PRIMARY KEY,
-    timestamp DATETIME,
-    iam_role TEXT,
-    privilege TEXT,  -- e.g., "s3:GetObject"
-    call_count INTEGER
-);
-
--- Analysis results (weekly snapshots)
-CREATE TABLE analysis_results (
-    id INTEGER PRIMARY KEY,
-    analysis_date DATETIME,
-    iam_role TEXT,
-    assigned_privileges TEXT,  -- JSON array
-    used_privileges TEXT,      -- JSON array
-    unused_privileges TEXT,    -- JSON array
-    risk_level TEXT           -- HIGH/MEDIUM/LOW
-);
-
--- Indices for fast queries
-CREATE INDEX idx_usage_role ON privilege_usage(iam_role);
-CREATE INDEX idx_usage_timestamp ON privilege_usage(timestamp);
+```text
+dedicated OTel events = what instrumented applications did
+read-only IAM APIs    = what their roles are assigned
 ```
 
----
+## Event Contract
 
-## How The Correlation Works
+AWS SDK middleware must emit one OTel log record per attempted SDK operation. This signal is independent of trace sampling.
 
-### 1. Collect OTel Traces
+The required native OTel event name is:
+
+```text
+LogRecord.event_name = shinkai.aws_api_call
+```
+
+Modern OTel event APIs set `LogRecord.event_name`. For compatibility with log SDKs that do not yet expose that field, Shinkai and the provided Collector pipeline also accept an `event.name` attribute with the same value.
+
+Required attributes:
+
+| Attribute | Description |
+|---|---|
+| `event.id` | Stable unique ID required for retry deduplication |
+| `aws.iam.role.arn` | IAM role ARN or STS assumed-role ARN |
+| `aws.service` | AWS service, such as `s3` |
+| `aws.operation` | SDK operation, such as `GetObject` |
+| `shinkai.outcome` | `success`, `denied`, or `failed` |
+
+Recommended resource attributes:
+
+| Attribute | Description |
+|---|---|
+| `cloud.account.id` | AWS account ID; otherwise derived from the role ARN |
+| `service.name` | Workload name |
+| `deployment.environment.name` | Environment |
+| `shinkai.tenant.id` | Tenant; defaults to `default` |
+
+Recommended event attributes:
+
+| Attribute | Description |
+|---|---|
+| `aws.iam.action` | Canonical IAM action when known |
+| `aws.request_id` | AWS request ID |
+
+Trace and span IDs on the OTel log record are retained for trace drilldown.
+
+Example logical event:
 
 ```json
 {
-  "resourceSpans": [{
-    "resource": {
-      "attributes": [{
-        "key": "aws.iam.role",
-        "value": { "stringValue": "arn:aws:iam::123:role/WebServerRole" }
-      }]
-    },
-    "scopeSpans": [{
-      "spans": [{
-        "name": "S3.GetObject",
-        "attributes": [
-          { "key": "aws.service", "value": { "stringValue": "s3" }},
-          { "key": "aws.operation", "value": { "stringValue": "GetObject" }}
-        ]
-      }]
-    }]
-  }]
+  "event.name": "shinkai.aws_api_call",
+  "event.id": "018f65d4-4ae8-7c22-91eb-3d70c95f81a1",
+  "aws.iam.role.arn": "arn:aws:iam::123456789012:role/PaymentsAPI",
+  "cloud.account.id": "123456789012",
+  "aws.service": "s3",
+  "aws.operation": "GetObject",
+  "aws.iam.action": "s3:GetObject",
+  "shinkai.outcome": "success",
+  "aws.request_id": "request-id",
+  "service.name": "payments-api",
+  "deployment.environment.name": "production"
 }
 ```
 
-**Extract:** `iam_role = "WebServerRole"`, `privilege = "s3:GetObject"`
+Only `success` proves permission usage. Denied and failed events are stored but never count as used permissions.
 
-### 2. Fetch IAM Assignments
+## Role Identity
 
-```bash
-$ aws iam list-attached-role-policies --role-name WebServerRole
+Generic AWS SDK spans do not reliably contain the caller's role. The application instrumentation must attach identity to the dedicated event or its OTel resource.
+
+Common sources are:
+
+- One cached `sts:GetCallerIdentity` call during application startup
+- `AWS_ROLE_ARN` for EKS IRSA
+- EKS Pod Identity metadata
+- ECS task-role metadata
+- EC2 instance profile metadata
+- Lambda execution-role configuration
+
+Shinkai normalizes this STS ARN:
+
+```text
+arn:aws:sts::123456789012:assumed-role/PaymentsAPI/session-id
 ```
 
-```json
-{
-  "AttachedPolicies": [{
-    "PolicyArn": "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-  }]
-}
+to this IAM role ARN:
+
+```text
+arn:aws:iam::123456789012:role/PaymentsAPI
 ```
 
-**Policy contains:** `["s3:*", "s3:GetObject", "s3:PutObject", "s3:DeleteBucket", ...]`
+Applications that assume multiple roles at runtime must attach the active role to each event rather than using one process-level resource attribute.
 
-### 3. Correlate (Simple String Matching)
+## IAM Access
 
-```go
-func correlate(assigned []string, observed []OTelEvent) (used, unused []string) {
-    usedSet := make(map[string]int)
-    
-    for _, event := range observed {
-        // Normalize: "s3" + "GetObject" → "s3:GetObject"
-        privilege := fmt.Sprintf("%s:%s", 
-            strings.ToLower(event.Service), 
-            event.Operation)
-        
-        // Check if this privilege is assigned
-        if contains(assigned, privilege) {
-            usedSet[privilege]++
-        }
-    }
-    
-    // Unused = assigned but not in usedSet
-    for _, priv := range assigned {
-        if _, ok := usedSet[priv]; !ok {
-            unused = append(unused, priv)
-        }
-    }
-    
-    return keys(usedSet), unused
-}
-```
-
-**That's it. No ML. No heuristics. Just set operations.**
-
----
-
-## Security
-
-### IAM Permissions Required
+Shinkai uses these six read-only IAM APIs:
 
 ```json
 {
@@ -768,131 +139,218 @@ func correlate(assigned []string, observed []OTelEvent) (used, unused []string) 
   "Statement": [{
     "Effect": "Allow",
     "Action": [
-      "iam:GetRole",
       "iam:ListRoles",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListRolePolicies",
       "iam:GetPolicy",
       "iam:GetPolicyVersion",
-      "iam:ListAttachedRolePolicies",
-      "iam:ListRolePolicies"
+      "iam:GetRolePolicy"
     ],
     "Resource": "*"
   }]
 }
 ```
 
-**Read-only. Cannot modify IAM.**
+For managed policies, `GetPolicy` supplies the active `DefaultVersionId`, which is then passed to `GetPolicyVersion`. Shared managed policies are cached during a scrape.
 
-### Data Privacy
+Every snapshot preserves:
 
-- All telemetry stays local (SQLite)
-- No data sent to external services
-- AWS API calls are read-only
-- OTel traces contain no secrets (just API call names)
+- Managed and inline identity-policy provenance
+- `Allow` and `Deny`
+- `Action` and `NotAction`
+- `Resource` and `NotResource`
+- Conditions and statement IDs
+- Policy ARN, name, and active version
+- Decoded raw policy documents
 
-### Threat Model
+A snapshot becomes queryable only after every listed role and attached or inline policy has been fetched and written. A partial AWS failure never replaces the latest complete snapshot.
 
-**If Shinkai Shoujo is compromised:**
-- ❌ Cannot modify IAM policies
-- ❌ Cannot access application data
-- ✅ Can see which AWS APIs your apps call (already visible in CloudTrail)
-- ✅ Can see IAM role names (already public in your account)
+The six-API scope does not include `iam:GetRole`. AWS does not return permissions-boundary details from `ListRoles`, so boundaries are not inventoried. They are explicitly treated as an external constraint rather than silently modeled as grants.
 
-**Mitigations:**
-- Run in isolated environment
-- Use read-only IAM credentials
-- Review generated Terraform before applying
+## Quick Start
 
----
+Prerequisites:
 
-## Comparison with Alternatives
+- Docker Compose
+- AWS credentials containing the read-only IAM permissions above
 
-| Tool | Approach | Deployment | Accuracy | Cost |
-|------|----------|-----------|----------|------|
-| **Shinkai Shoujo** | OTel traces | Agentless | High (real API calls) | Free |
-| AWS Access Analyzer | IAM policy simulation | AWS service | Medium (heuristics) | $$ |
-| CloudTrail analysis | Parse logs | AWS service | High (real calls) | $$$$ (storage) |
-| Manual audit | Spreadsheets | Manual | Low (guesswork) | Time |
-| Custom scripts | Parse CloudTrail | Self-hosted | Medium (sampling) | Dev time |
-
-**Why Shinkai Shoujo:**
-- ✅ Free and open source
-- ✅ Works with existing OTel (no new infrastructure)
-- ✅ Accurate (based on real API calls)
-- ✅ Fast (weekly batch, not real-time log parsing)
-- ✅ Safe (generates Terraform, doesn't auto-apply)
-
----
-
-## Roadmap
-
-### v1.0 (Current)
-- ✅ OTel trace ingestion
-- ✅ AWS IAM scraping
-- ✅ Privilege correlation
-- ✅ Terraform generation
-- ✅ CLI interface
-- ✅ SQLite storage
-
-### v1.1 (Next)
-- [ ] Grafana integration
-- [ ] Prometheus metrics
-- [ ] Multi-account support
-- [ ] Scheduled job exclusions (auto-detect cron)
-
-### v1.2
-- [ ] CloudTrail integration (fallback for apps without OTel)
-- [ ] Resource-specific privileges (not just service:action)
-- [ ] Confidence scoring (based on observation window)
-
-### v2.0
-- [ ] GCP IAM support
-- [ ] Azure RBAC support
-- [ ] Kubernetes RBAC support
-- [ ] Policy simulation ("what if I remove this?")
-
----
-
-## Contributing
-
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md)
-
-**Areas needing help:**
-- AWS SDK special cases (lambda:Invoke → lambda:InvokeFunction)
-- Multi-cloud support (GCP, Azure)
-- Documentation improvements
+Start ClickHouse, Shinkai, the OTel Collector, and Grafana:
 
 ```bash
-# Development setup
-git clone https://github.com/0xKirisame/shinkai-shoujo
-cd shinkai-shoujo
-go mod download
-go test ./...
-
-# Run locally
-go run cmd/shinkai-shoujo/main.go analyze
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_SESSION_TOKEN=... # if applicable
+docker compose up --build
 ```
 
----
+Development endpoints:
+
+| Service | Endpoint |
+|---|---|
+| OTel Collector gRPC | `localhost:4317` |
+| OTel Collector HTTP | `http://localhost:4318` |
+| Shinkai query API | `http://localhost:9090` |
+| Grafana | `http://localhost:3000` |
+| ClickHouse native | `localhost:9000` |
+| ClickHouse HTTP | `http://localhost:8123` |
+
+Development credentials and tokens are in `compose.yaml` and `deploy/config.yaml`. Replace them outside local development.
+
+Test the backend:
+
+```bash
+curl http://localhost:9090/healthz
+
+curl \
+  -H 'Authorization: Bearer shinkai-dev-api-token' \
+  'http://localhost:9090/api/v1/usage?account_id=123456789012'
+```
+
+Grafana starts with a provisioned ClickHouse datasource and the **Shinkai Shoujo IAM Usage** dashboard. It includes usage frequency, first/last use, denied calls, exact unobserved candidates after a configurable minimum coverage period, and unresolved wildcard grants. The initial development login is `admin` / `admin`.
+
+## Build From Source
+
+```bash
+go build -o shinkai-shoujo ./cmd/shinkai-shoujo
+./shinkai-shoujo init
+```
+
+The generated config contains ClickHouse, OTLP receiver, AWS, observation-window, and HTTP API settings.
+
+Useful commands:
+
+```bash
+# Fetch and publish one complete identity-policy snapshot
+shinkai-shoujo scrape
+
+# Fetch a snapshot and run a one-time analysis
+shinkai-shoujo analyze
+
+# Report from the latest complete snapshot
+shinkai-shoujo report --account-id 123456789012
+
+# Run OTLP ingestion, the query API, and periodic IAM snapshots
+shinkai-shoujo daemon --interval 6h
+
+# Export review data; Terraform output contains locals only and changes no IAM resources
+shinkai-shoujo generate json --account-id 123456789012
+shinkai-shoujo generate yaml --account-id 123456789012
+shinkai-shoujo generate terraform --account-id 123456789012
+```
+
+## Configuration
+
+```yaml
+otel:
+  endpoint: "127.0.0.1:4318"
+  role_attribute: "aws.iam.role.arn"
+  auth_token: ""
+
+aws:
+  region: "us-east-1"
+  account_id: "123456789012"
+
+observation:
+  window_days: 30
+  min_observation_days: 7
+
+clickhouse:
+  addresses: ["localhost:9000"]
+  database: "shinkai_shoujo"
+  username: "default"
+  password: ""
+  secure: false
+  dial_timeout: "5s"
+  retention_days: 90
+
+http:
+  endpoint: "127.0.0.1:9090"
+  auth_token: ""
+```
+
+Non-loopback OTLP or HTTP binds require a bearer token. TLS should be terminated by a trusted reverse proxy when traffic crosses hosts. ClickHouse TLS is enabled with `clickhouse.secure`.
+
+## Query API
+
+All endpoints except `/healthz` require `Authorization: Bearer <http.auth_token>` when a token is configured.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /healthz` | ClickHouse connectivity |
+| `GET /metrics` | Prometheus backend metrics |
+| `GET /api/v1/usage` | Frequency and first/last use by role and action |
+| `GET /api/v1/inventory` | Latest complete identity-policy snapshot |
+| `GET /api/v1/analysis` | Assigned-versus-observed correlation |
+
+Usage filters:
+
+```text
+tenant_id
+account_id
+role_arn
+workload
+environment
+since (RFC3339)
+until (RFC3339)
+```
+
+Analysis filters:
+
+```text
+tenant_id
+account_id
+window_days
+```
+
+## ClickHouse Tables
+
+Shinkai creates and migrates:
+
+- `usage_events`: immutable raw OTel usage events
+- `permission_usage_hourly`: unique successful-event aggregates
+- `permission_usage_hourly_mv`: successful-event materialized view
+- `collector_heartbeats`: received and accepted event coverage
+- `iam_snapshots`: complete snapshot publication records
+- `iam_roles`: role identity per snapshot
+- `iam_policy_statements`: lossless policy statement inventory
+
+Raw events and hourly aggregates use the configured retention TTL.
+
+## Interpretation
+
+Results use conservative language:
+
+- `used`: successfully observed and covered by an assigned action or pattern
+- `candidate_unused`: assigned exact action not observed in the selected window
+- `unresolved`: wildcard, `NotAction`, unsupported mapping, or semantics that cannot safely become a removal candidate
+- `denied`: attempted and rejected, never evidence of use
+- `failed`: failed for another reason, never evidence of use
+
+Only roles represented by OTel usage events are analyzed. This prevents unrelated infrastructure roles from being labeled unused.
+
+Terraform output is review-only HCL containing local values. It deliberately creates no IAM policies or attachments.
+
+## Limitations
+
+- AWS SDK operations do not always map one-to-one to IAM actions.
+- Dependent permissions such as `iam:PassRole` may be required without a separate SDK operation.
+- Shared roles combine activity from every workload using that role.
+- Uninstrumented code is invisible.
+- Reliable frequency requires the dedicated event signal not to be sampled or dropped.
+- Permissions boundaries, SCPs, session policies, and resource-based policies are not currently inventoried.
+
+These limitations are surfaced as unresolved semantics or review warnings rather than silently converted into removal instructions.
+
+## Development
+
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+Set `CLICKHOUSE_TEST_ADDR=localhost:9000` to run the opt-in ClickHouse integration test.
 
 ## License
 
-Apache 2.0 - See [LICENSE](LICENSE)
-
-Free for commercial and personal use.
-
----
-
-## Support
-
-- 🐛 [Report bugs](https://github.com/0xKirisame/shinkai-shoujo/issues)
-- 💡 [Request features](https://github.com/0xKirisame/shinkai-shoujo/discussions)
-  
----
-
-<div align="center">
-
-**Finding your infrastructure's true identity, one privilege at a time.**
-
-[Get Started](#quick-start) • [GitHub](https://github.com/0xKirisame/shinkai-shoujo)
-
-</div>
+Apache 2.0. See `LICENSE`.

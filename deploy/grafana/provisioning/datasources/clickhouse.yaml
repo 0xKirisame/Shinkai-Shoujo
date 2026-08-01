@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: Shinkai ClickHouse
+    uid: shinkai-clickhouse
+    type: grafana-clickhouse-datasource
+    access: proxy
+    isDefault: true
+    jsonData:
+      host: clickhouse
+      port: 9000
+      protocol: native
+      username: shinkai
+      defaultDatabase: shinkai_shoujo
+      secure: false
+    secureJsonData:
+      password: shinkai-dev-password

@@ -1,95 +1,198 @@
 package receiver
 
 import (
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
 	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
-	tracev1 "go.opentelemetry.io/proto/otlp/trace/v1"
+	logsv1 "go.opentelemetry.io/proto/otlp/logs/v1"
 
+	"github.com/0xKirisame/shinkai-shoujo/internal/correlation"
 	"github.com/0xKirisame/shinkai-shoujo/internal/metrics"
 	"github.com/0xKirisame/shinkai-shoujo/internal/storage"
 )
 
-// PrivilegeRecord is a parsed privilege observation from an OTel span.
-type PrivilegeRecord struct {
-	Timestamp time.Time
-	IAMRole   string
-	Privilege string
-}
+const usageEventName = "shinkai.aws_api_call"
 
-// parseTraces extracts privilege records from an ExportTraceServiceRequest.
-func parseTraces(
-	resourceSpans []*tracev1.ResourceSpans,
+// parseLogs extracts dedicated AWS API call events from an OTLP logs payload.
+func parseLogs(
+	resourceLogs []*logsv1.ResourceLogs,
+	roleAttribute string,
+	now time.Time,
 	log *slog.Logger,
 	m *metrics.Metrics,
-) []storage.PrivilegeUsageRecord {
-	var records []storage.PrivilegeUsageRecord
+) ([]storage.UsageEvent, uint64) {
+	now = now.UTC()
+	var (
+		events   []storage.UsageEvent
+		received uint64
+	)
 
-	for _, rs := range resourceSpans {
-		// Extract aws.iam.role from resource attributes
-		iamRole := attrValue(rs.GetResource().GetAttributes(), "aws.iam.role")
-		if iamRole == "" {
-			log.Debug("skipping ResourceSpans: missing aws.iam.role resource attribute")
-			continue
-		}
+	for _, resourceLog := range resourceLogs {
+		resourceAttrs := attributes(resourceLog.GetResource().GetAttributes())
+		for _, scopeLog := range resourceLog.GetScopeLogs() {
+			for _, record := range scopeLog.GetLogRecords() {
+				received++
+				m.EventsReceived.Inc()
 
-		for _, ss := range rs.GetScopeSpans() {
-			for _, span := range ss.GetSpans() {
-				m.SpansReceived.Inc()
+				recordAttrs := attributes(record.GetAttributes())
+				if record.GetEventName() != usageEventName && recordAttrs["event.name"] != usageEventName && record.GetBody().GetStringValue() != usageEventName {
+					skipLogRecord(log, m, record, "not a dedicated AWS API call event")
+					continue
+				}
+				attrs := mergeAttributes(resourceAttrs, recordAttrs)
 
-				service := attrValue(span.GetAttributes(), "aws.service")
-				operation := attrValue(span.GetAttributes(), "aws.operation")
-
-				if service == "" || operation == "" {
-					log.Debug("skipping span: missing aws.service or aws.operation",
-						"span_id", fmt.Sprintf("%x", span.GetSpanId()),
-						"iam_role", iamRole,
-					)
-					m.SpansSkipped.Inc()
+				role := firstAttribute(attrs, roleAttribute, "aws.iam.role.arn", "aws.iam.role")
+				service := firstAttribute(attrs, "aws.service", "rpc.service")
+				operation := firstAttribute(attrs, "aws.operation", "rpc.method")
+				if role == "" || service == "" || operation == "" {
+					skipLogRecord(log, m, record, "missing role, service, or operation")
 					continue
 				}
 
-				priv := normalizePrivilege(service, operation)
-				ts := spanTimestamp(span)
+				outcome, ok := normalizeOutcome(firstAttribute(attrs, "shinkai.outcome", "event.outcome", "outcome"))
+				if !ok {
+					skipLogRecord(log, m, record, "missing or unknown outcome")
+					continue
+				}
 
-				records = append(records, storage.PrivilegeUsageRecord{
-					Timestamp: ts,
-					IAMRole:   iamRole,
-					Privilege: priv,
-					CallCount: 1,
+				eventTime, ok := logTimestamp(record, now)
+				if !ok || eventTime.After(now.Add(5*time.Minute)) {
+					skipLogRecord(log, m, record, "timestamp is too far in the future")
+					continue
+				}
+
+				eventID := strings.TrimSpace(attrs["event.id"])
+				if eventID == "" {
+					skipLogRecord(log, m, record, "missing event ID")
+					continue
+				}
+
+				role = normalizeRoleARN(role)
+				accountID := strings.TrimSpace(attrs["cloud.account.id"])
+				if accountID == "" {
+					accountID = accountIDFromARN(role)
+				}
+				tenantID := strings.TrimSpace(attrs["shinkai.tenant.id"])
+				if tenantID == "" {
+					tenantID = "default"
+				}
+				iamAction := strings.TrimSpace(attrs["aws.iam.action"])
+				if iamAction == "" {
+					iamAction = correlation.MapSDKToIAM(strings.ToLower(service) + ":" + operation)
+				}
+
+				events = append(events, storage.UsageEvent{
+					EventID:      eventID,
+					EventTime:    eventTime,
+					ReceivedAt:   now,
+					TenantID:     tenantID,
+					AccountID:    accountID,
+					RoleARN:      role,
+					Workload:     strings.TrimSpace(attrs["service.name"]),
+					Environment:  firstAttribute(attrs, "deployment.environment.name", "deployment.environment"),
+					AWSService:   service,
+					SDKOperation: operation,
+					IAMAction:    iamAction,
+					Outcome:      outcome,
+					RequestID:    strings.TrimSpace(attrs["aws.request_id"]),
+					TraceID:      hex.EncodeToString(record.GetTraceId()),
+					SpanID:       hex.EncodeToString(record.GetSpanId()),
 				})
 			}
 		}
 	}
-	return records
+
+	return events, received
 }
 
-// normalizePrivilege produces "service:Operation" from span attributes.
-// Service is lowercased; operation preserves original casing.
-func normalizePrivilege(service, operation string) string {
-	return fmt.Sprintf("%s:%s", strings.ToLower(service), operation)
+func attributes(attrs []*commonv1.KeyValue) map[string]string {
+	values := make(map[string]string, len(attrs))
+	for _, attr := range attrs {
+		if attr == nil || attr.Value == nil {
+			continue
+		}
+		if value, ok := attr.Value.Value.(*commonv1.AnyValue_StringValue); ok {
+			values[attr.Key] = value.StringValue
+		}
+	}
+	return values
 }
 
-// attrValue returns the string value of a named attribute, or "" if not found.
-func attrValue(attrs []*commonv1.KeyValue, key string) string {
-	for _, kv := range attrs {
-		if kv.GetKey() == key {
-			if sv := kv.GetValue().GetStringValue(); sv != "" {
-				return sv
-			}
+func mergeAttributes(resourceAttrs, recordAttrs map[string]string) map[string]string {
+	merged := make(map[string]string, len(resourceAttrs)+len(recordAttrs))
+	for key, value := range resourceAttrs {
+		merged[key] = value
+	}
+	for key, value := range recordAttrs {
+		merged[key] = value
+	}
+	return merged
+}
+
+func firstAttribute(attrs map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(attrs[key]); key != "" && value != "" {
+			return value
 		}
 	}
 	return ""
 }
 
-// spanTimestamp converts a span's start time from nanoseconds to time.Time.
-// Falls back to current time if the span timestamp is zero.
-func spanTimestamp(span *tracev1.Span) time.Time {
-	if span.GetStartTimeUnixNano() != 0 {
-		return time.Unix(0, int64(span.GetStartTimeUnixNano()))
+func normalizeOutcome(outcome string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(outcome)) {
+	case "success", "succeeded", "ok":
+		return "success", true
+	case "access_denied", "accessdenied", "denied":
+		return "denied", true
+	case "fail", "failed", "error":
+		return "failed", true
+	default:
+		return "", false
 	}
-	return time.Now()
+}
+
+func normalizeRoleARN(role string) string {
+	role = strings.TrimSpace(role)
+	parts := strings.SplitN(role, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "sts" || !strings.HasPrefix(parts[5], "assumed-role/") {
+		return role
+	}
+	assumedRole := strings.TrimPrefix(parts[5], "assumed-role/")
+	separator := strings.LastIndexByte(assumedRole, '/')
+	if separator <= 0 || separator == len(assumedRole)-1 {
+		return role
+	}
+	return fmt.Sprintf("arn:%s:iam::%s:role/%s", parts[1], parts[4], assumedRole[:separator])
+}
+
+func accountIDFromARN(role string) string {
+	parts := strings.SplitN(role, ":", 6)
+	if len(parts) == 6 && parts[0] == "arn" {
+		return parts[4]
+	}
+	return ""
+}
+
+func logTimestamp(record *logsv1.LogRecord, now time.Time) (time.Time, bool) {
+	nanos := record.GetTimeUnixNano()
+	if nanos == 0 {
+		nanos = record.GetObservedTimeUnixNano()
+	}
+	if nanos == 0 {
+		return now, true
+	}
+	if nanos > math.MaxInt64 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, int64(nanos)).UTC(), true
+}
+
+func skipLogRecord(log *slog.Logger, m *metrics.Metrics, record *logsv1.LogRecord, reason string) {
+	log.Debug("skipping log record", "reason", reason, "span_id", hex.EncodeToString(record.GetSpanId()))
+	m.EventsSkipped.Inc()
 }

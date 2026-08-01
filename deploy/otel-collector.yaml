@@ -1,0 +1,31 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  filter/shinkai:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'event_name != "shinkai.aws_api_call" and attributes["event.name"] != "shinkai.aws_api_call"'
+  batch:
+    send_batch_size: 4096
+    timeout: 1s
+
+exporters:
+  otlphttp/shinkai:
+    endpoint: http://shinkai:4318
+    encoding: proto
+    headers:
+      Authorization: "Bearer shinkai-dev-otlp-token"
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [filter/shinkai, batch]
+      exporters: [otlphttp/shinkai]

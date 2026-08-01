@@ -9,13 +9,14 @@ import (
 
 // Metrics holds all Prometheus metrics for shinkai-shoujo.
 type Metrics struct {
-	SpansReceived    prometheus.Counter
-	SpansSkipped     prometheus.Counter
-	IAMRolesScraped  prometheus.Gauge
-	AnalysisRuns     prometheus.Counter
-	UnusedPrivileges *prometheus.GaugeVec
-	AnalysisDuration prometheus.Histogram
-	gatherer         prometheus.Gatherer
+	EventsReceived        prometheus.Counter
+	EventsSkipped         prometheus.Counter
+	IAMRolesScraped       prometheus.Gauge
+	AnalysisRuns          prometheus.Counter
+	CandidatePermissions  prometheus.Gauge
+	UnresolvedPermissions prometheus.Gauge
+	AnalysisDuration      prometheus.Histogram
+	gatherer              prometheus.Gatherer
 }
 
 // New creates and registers all metrics with the default Prometheus registry.
@@ -31,17 +32,17 @@ func NewWithRegistry(reg prometheus.Registerer) *Metrics {
 		return c
 	}
 
-	spansReceived := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "shinkai_spans_received_total",
-		Help: "Total number of OTel spans received.",
+	eventsReceived := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinkai_events_received_total",
+		Help: "Total number of dedicated OTel AWS usage events received.",
 	})
-	factory(spansReceived)
+	factory(eventsReceived)
 
-	spansSkipped := prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "shinkai_spans_skipped_total",
-		Help: "Total number of OTel spans skipped (missing required attributes).",
+	eventsSkipped := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "shinkai_events_skipped_total",
+		Help: "Total number of OTel log records skipped because they were not valid usage events.",
 	})
-	factory(spansSkipped)
+	factory(eventsSkipped)
 
 	iamRolesScraped := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "shinkai_iam_roles_scraped",
@@ -55,11 +56,17 @@ func NewWithRegistry(reg prometheus.Registerer) *Metrics {
 	})
 	factory(analysisRuns)
 
-	unusedPrivileges := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "shinkai_unused_privileges",
-		Help: "Number of unused privileges per IAM role.",
-	}, []string{"iam_role", "risk_level"})
-	factory(unusedPrivileges)
+	candidatePermissions := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shinkai_candidate_unused_permissions",
+		Help: "Number of candidate unused permissions in the most recent analysis.",
+	})
+	factory(candidatePermissions)
+
+	unresolvedPermissions := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "shinkai_unresolved_permissions",
+		Help: "Number of wildcard or semantically unresolved permissions in the most recent analysis.",
+	})
+	factory(unresolvedPermissions)
 
 	analysisDuration := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "shinkai_analysis_duration_seconds",
@@ -74,13 +81,14 @@ func NewWithRegistry(reg prometheus.Registerer) *Metrics {
 	}
 
 	return &Metrics{
-		SpansReceived:    spansReceived,
-		SpansSkipped:     spansSkipped,
-		IAMRolesScraped:  iamRolesScraped,
-		AnalysisRuns:     analysisRuns,
-		UnusedPrivileges: unusedPrivileges,
-		AnalysisDuration: analysisDuration,
-		gatherer:         gatherer,
+		EventsReceived:        eventsReceived,
+		EventsSkipped:         eventsSkipped,
+		IAMRolesScraped:       iamRolesScraped,
+		AnalysisRuns:          analysisRuns,
+		CandidatePermissions:  candidatePermissions,
+		UnresolvedPermissions: unresolvedPermissions,
+		AnalysisDuration:      analysisDuration,
+		gatherer:              gatherer,
 	}
 }
 

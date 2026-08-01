@@ -14,8 +14,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Observation.WindowDays <= 0 {
 		t.Error("expected positive window_days")
 	}
-	if cfg.Storage.Path == "" {
-		t.Error("expected non-empty storage path")
+	if len(cfg.ClickHouse.Addresses) == 0 {
+		t.Error("expected at least one ClickHouse address")
 	}
 }
 
@@ -51,9 +51,15 @@ aws:
 observation:
   window_days: 14
   min_observation_days: 3
-storage:
-  path: "/tmp/test.db"
-metrics:
+clickhouse:
+  addresses: ["clickhouse.internal:9000"]
+  database: "shinkai_test"
+  username: "shinkai"
+  password: "secret"
+  secure: true
+  dial_timeout: "3s"
+  retention_days: 45
+http:
   endpoint: "127.0.0.1:9090"
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0600); err != nil {
@@ -73,6 +79,36 @@ metrics:
 	}
 	if cfg.Observation.WindowDays != 14 {
 		t.Errorf("unexpected window_days: %d", cfg.Observation.WindowDays)
+	}
+	if len(cfg.ClickHouse.Addresses) != 1 || cfg.ClickHouse.Addresses[0] != "clickhouse.internal:9000" {
+		t.Errorf("unexpected ClickHouse addresses: %v", cfg.ClickHouse.Addresses)
+	}
+	if cfg.ClickHouse.Database != "shinkai_test" || cfg.ClickHouse.RetentionDays != 45 {
+		t.Errorf("unexpected ClickHouse config: %+v", cfg.ClickHouse)
+	}
+}
+
+func TestValidateRejectsInvalidClickHouseConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"no addresses", func(cfg *Config) { cfg.ClickHouse.Addresses = nil }},
+		{"empty address", func(cfg *Config) { cfg.ClickHouse.Addresses = []string{""} }},
+		{"multiple addresses", func(cfg *Config) { cfg.ClickHouse.Addresses = []string{"one:9000", "two:9000"} }},
+		{"empty database", func(cfg *Config) { cfg.ClickHouse.Database = "" }},
+		{"zero timeout", func(cfg *Config) { cfg.ClickHouse.DialTimeout = 0 }},
+		{"zero retention", func(cfg *Config) { cfg.ClickHouse.RetentionDays = 0 }},
+		{"HTTP URL", func(cfg *Config) { cfg.HTTP.Endpoint = "http://127.0.0.1:9090" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.mutate(cfg)
+			if err := validate(cfg); err == nil {
+				t.Fatal("validate() unexpectedly succeeded")
+			}
+		})
 	}
 }
 

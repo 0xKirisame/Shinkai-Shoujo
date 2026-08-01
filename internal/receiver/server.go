@@ -1,60 +1,104 @@
 package receiver
 
 import (
+	"compress/gzip"
 	"context"
+	"crypto/subtle"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
-	"google.golang.org/protobuf/encoding/protojson"
+	statuspb "google.golang.org/genproto/googleapis/rpc/status"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 
-	tracev1 "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	logsv1 "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 
 	"github.com/0xKirisame/shinkai-shoujo/internal/metrics"
 	"github.com/0xKirisame/shinkai-shoujo/internal/storage"
 )
 
-// maxBodyBytes is the maximum accepted size for an OTLP request body (32 MiB).
+// maxBodyBytes is the maximum decompressed size of an OTLP request body.
 const maxBodyBytes = 32 << 20
 
-// Server is the OTLP/HTTP receiver.
+type eventStore interface {
+	BatchRecordUsageEvents(context.Context, []storage.UsageEvent) error
+	RecordCollectorHeartbeat(context.Context, time.Time, uint64, uint64) error
+}
+
+// Server is the OTLP/HTTP logs receiver.
 type Server struct {
-	db      *storage.DB
-	log     *slog.Logger
-	metrics *metrics.Metrics
-	srv     *http.Server
+	store         eventStore
+	log           *slog.Logger
+	metrics       *metrics.Metrics
+	roleAttribute string
+	authToken     string
+	srv           *http.Server
 }
 
 // New creates a new receiver Server.
-func New(endpoint string, db *storage.DB, log *slog.Logger, m *metrics.Metrics) (*Server, error) {
-	host, port, err := net.SplitHostPort(endpoint)
+func New(endpoint, roleAttribute, authToken string, store eventStore, log *slog.Logger, m *metrics.Metrics) (*Server, error) {
+	addr, err := endpointAddress(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid OTel endpoint %q: %w", endpoint, err)
 	}
-	addr := net.JoinHostPort(host, port)
 
 	s := &Server{
-		db:      db,
-		log:     log,
-		metrics: m,
+		store:         store,
+		log:           log,
+		metrics:       m,
+		roleAttribute: roleAttribute,
+		authToken:     authToken,
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/traces", s.handleTraces)
+	mux.HandleFunc("/v1/logs", s.handleLogs)
 
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,  // abort if headers arrive slowly
-		ReadTimeout:       30 * time.Second,  // abort if full request takes too long
-		WriteTimeout:      30 * time.Second,  // abort if response takes too long
-		IdleTimeout:       120 * time.Second, // close idle keep-alive connections
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	return s, nil
+}
+
+func endpointAddress(endpoint string) (string, error) {
+	addr := endpoint
+	if strings.Contains(endpoint, "://") {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			return "", err
+		}
+		if strings.EqualFold(u.Scheme, "https") {
+			return "", fmt.Errorf("https is not supported because the receiver has no TLS configuration")
+		}
+		if !strings.EqualFold(u.Scheme, "http") {
+			return "", fmt.Errorf("unsupported URL scheme %q", u.Scheme)
+		}
+		if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return "", fmt.Errorf("endpoint URL must contain only a host and port")
+		}
+		addr = u.Host
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	if port == "" {
+		return "", fmt.Errorf("missing port")
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 // Start begins listening and serving. It blocks until the context is cancelled.
@@ -73,59 +117,141 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("receiver: %w", err)
 	case <-ctx.Done():
 		s.log.Info("shutting down OTLP receiver")
-		return s.srv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		err := s.srv.Shutdown(shutdownCtx)
+		if errors.Is(err, context.DeadlineExceeded) {
+			if closeErr := s.srv.Close(); closeErr != nil {
+				return errors.Join(err, closeErr)
+			}
+		}
+		return err
 	}
 }
 
-func (s *Server) handleTraces(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.authorized(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="otlp"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 
-	// Limit request body size to prevent memory exhaustion.
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !supportedMediaType(mediaType) {
+		http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	contentEncoding := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding")))
+	if contentEncoding != "" && contentEncoding != "identity" && contentEncoding != "gzip" {
+		http.Error(w, "unsupported content encoding", http.StatusUnsupportedMediaType)
+		return
+	}
 	defer r.Body.Close()
 
-	body, err := io.ReadAll(r.Body)
+	var reader io.Reader = r.Body
+	if contentEncoding == "gzip" {
+		gz, err := gzip.NewReader(r.Body)
+		if err != nil {
+			http.Error(w, "invalid gzip body", http.StatusBadRequest)
+			return
+		}
+		defer gz.Close()
+		reader = gz
+	}
+
+	body, err := io.ReadAll(io.LimitReader(reader, maxBodyBytes+1))
 	if err != nil {
-		// MaxBytesReader returns a 413-flavoured error on overflow.
 		s.log.Debug("failed to read request body", "error", err)
-		http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxBodyBytes {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
-	req := &tracev1.ExportTraceServiceRequest{}
-
-	ct := r.Header.Get("Content-Type")
-	switch {
-	case ct == "application/json" || ct == "application/x-protobuf-json":
-		if err := protojson.Unmarshal(body, req); err != nil {
-			s.log.Debug("failed to parse JSON trace request", "error", err)
-			http.Error(w, "invalid JSON body", http.StatusBadRequest)
-			return
-		}
-	default:
-		// Treat everything else as binary protobuf (application/x-protobuf).
-		if err := proto.Unmarshal(body, req); err != nil {
-			s.log.Debug("failed to parse protobuf trace request", "error", err)
-			http.Error(w, "invalid protobuf body", http.StatusBadRequest)
-			return
-		}
-	}
-
-	records := parseTraces(req.GetResourceSpans(), s.log, s.metrics)
-	if len(records) == 0 {
-		w.WriteHeader(http.StatusOK)
+	req := &logsv1.ExportLogsServiceRequest{}
+	if err := proto.Unmarshal(body, req); err != nil {
+		s.log.Debug("failed to parse protobuf logs request", "error", err)
+		http.Error(w, "invalid protobuf body", http.StatusBadRequest)
 		return
 	}
 
-	if err := s.db.BatchRecordPrivilegeUsage(r.Context(), records); err != nil {
-		s.log.Error("failed to record privilege usage", "error", err)
+	now := time.Now().UTC()
+	events, received := parseLogs(req.GetResourceLogs(), s.roleAttribute, now, s.log, s.metrics)
+	if len(events) != 0 {
+		if err := s.store.BatchRecordUsageEvents(r.Context(), events); err != nil {
+			s.log.Error("failed to record usage events", "error", err)
+			if heartbeatErr := s.store.RecordCollectorHeartbeat(r.Context(), now, received, 0); heartbeatErr != nil {
+				s.log.Error("failed to record collector heartbeat", "error", heartbeatErr)
+			}
+			s.writeUnavailable(w)
+			return
+		}
+	}
+	if err := s.store.RecordCollectorHeartbeat(r.Context(), now, received, uint64(len(events))); err != nil {
+		s.log.Error("failed to record collector heartbeat", "error", err)
+	}
+
+	s.log.Debug("processed usage events from logs", "received", received, "accepted", len(events))
+	s.writeOTLPResponse(w, received-uint64(len(events)))
+}
+
+func supportedMediaType(mediaType string) bool {
+	return mediaType == "application/x-protobuf"
+}
+
+func (s *Server) authorized(r *http.Request) bool {
+	if s.authToken == "" {
+		return true
+	}
+	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) == 1
+}
+
+func (s *Server) writeOTLPResponse(w http.ResponseWriter, rejected uint64) {
+	response := &logsv1.ExportLogsServiceResponse{}
+	if rejected != 0 {
+		response.PartialSuccess = &logsv1.ExportLogsPartialSuccess{
+			RejectedLogRecords: int64(rejected),
+			ErrorMessage:       fmt.Sprintf("%d log record(s) rejected", rejected),
+		}
+	}
+	body, err := proto.Marshal(response)
+	if err != nil {
+		s.log.Error("failed to marshal OTLP response", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	s.log.Debug("recorded privilege usage from spans", "count", len(records))
+	w.Header().Set("Content-Type", "application/x-protobuf")
 	w.WriteHeader(http.StatusOK)
+	if len(body) != 0 {
+		_, _ = w.Write(body)
+	}
+}
+
+func (s *Server) writeUnavailable(w http.ResponseWriter) {
+	body, err := proto.Marshal(&statuspb.Status{
+		Code:    int32(codes.Unavailable),
+		Message: "usage event storage is unavailable",
+	})
+	if err != nil {
+		s.log.Error("failed to marshal OTLP error response", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write(body)
 }
