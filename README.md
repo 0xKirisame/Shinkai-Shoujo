@@ -1,5 +1,13 @@
 # Shinkai Shoujo
 
+<div align="center">
+
+<img src="https://static.wikia.nocookie.net/vocaloid/images/a/a7/%E6%B7%B1%E6%B5%B7%E5%B0%91%E5%A5%B3_-deep_sea_girl-.png/revision/latest?cb=20221216124014" alt="Deep Sea Girl" width="500" />
+
+*"Deep sea girl, pulled by her arm... The marine snow sings a song of blessing"*
+
+</div>
+
 CloudTrail-free AWS IAM usage observability from dedicated OpenTelemetry events.
 
 Shinkai receives one OTel log event for each AWS SDK operation performed by an application, stores those events in ClickHouse, snapshots the application's assigned IAM policies through read-only IAM APIs, and exposes usage, inventory, and conservative correlation results to Grafana and HTTP clients.
