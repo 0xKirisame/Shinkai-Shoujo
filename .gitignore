@@ -4,3 +4,7 @@
 # Local build and generated review output
 /shinkai-shoujo
 /cleanup.tf
+
+# Private disposable conference demo bundle
+/IAM-privilages-tests/
+/IAM-privilages-tests.zip
